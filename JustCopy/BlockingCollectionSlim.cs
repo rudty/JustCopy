@@ -8,29 +8,49 @@
 
     /// <summary>
     /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
+    /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
     /// </summary>
     public sealed class BlockingCollectionSlim<T>
     {
-        private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
-
         private readonly ConcurrentQueue<T> queue = new ConcurrentQueue<T>();
         private readonly object lockObject = new object();
 
         public int SpinCount { get; set; } = 10;
 
-        private int count = 0;
+        private int count;
+
         public int Count => count;
-        
+
+        private readonly int addNoPulseCount;
+
+        public BlockingCollectionSlim(int unsafeConsumeThreadCount = int.MaxValue)
+        {
+            if (unsafeConsumeThreadCount < 1)
+            {
+                throw new ArgumentException($"{nameof(unsafeConsumeThreadCount)}({unsafeConsumeThreadCount}) < 1");
+            }
+            
+            var localAddNoPulseCount = unsafeConsumeThreadCount * 2L;
+            if (localAddNoPulseCount > int.MaxValue)
+            {
+                localAddNoPulseCount = int.MaxValue;
+            }
+
+            addNoPulseCount = (int)localAddNoPulseCount;
+        }
+
         public void Add(T item)
         {
             queue.Enqueue(item);
             var oldCount = Interlocked.Increment(ref count);
-            if (oldCount is 0)
+            if (oldCount > addNoPulseCount)
             {
-                lock (lockObject)
-                {
-                    Monitor.Pulse(lockObject);
-                }
+                return;
+            }
+
+            lock (lockObject)
+            {
+                Monitor.Pulse(lockObject);
             }
         }
 
@@ -40,10 +60,18 @@
         public bool TryTake(out T item)
 #endif
         {
-            if (queue.TryDequeue(out item))
+            var localCount = Volatile.Read(ref count);
+            if (localCount > 0)
             {
-                _ = Interlocked.Decrement(ref count);
-                return true;
+                if (queue.TryDequeue(out item))
+                {
+                    _ = Interlocked.Decrement(ref count);
+                    return true;
+                }
+            }
+            else
+            {
+                item = default;
             }
 
             return false;
@@ -99,7 +127,7 @@
             {
                 spin.SpinOnce(sleep1Threshold: -1);
 
-                if (TryAutoReset())
+                if (TryTake(out item))
                 {
                     return true;
                 }
@@ -126,7 +154,7 @@
                 {
                     if (useTimeout)
                     {
-                        remainTimeout = UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                        remainTimeout = BlockingCollectionSlimCompanion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
                         if (remainTimeout <= 0)
                         {
                             return false;
@@ -145,8 +173,14 @@
                 }
             }
         }
+    }
 
-        private static int UpdateTimeOut(long startTimeStamp, int originalWaitMillisecondsTimeout)
+    public class BlockingCollectionSlimCompanion
+    {
+        private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static int UpdateTimeOut(long startTimeStamp, int originalWaitMillisecondsTimeout)
         {
             Debug.Assert(originalWaitMillisecondsTimeout != Timeout.Infinite);
 
@@ -167,7 +201,7 @@
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static long GetElapsedMilliseconds(long startTimeStamp)
+        public static long GetElapsedMilliseconds(long startTimeStamp)
         {
             var currentTimeStamp = Stopwatch.GetTimestamp();
             var elapsedTimeStamp = currentTimeStamp - startTimeStamp;
