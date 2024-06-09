@@ -54,8 +54,8 @@
             }
         }
 
-#if NET5_0_OR_GREATER
-        public bool TryTake([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out T? item)
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
+        public bool TryTake([System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out T item)
 #else
         public bool TryTake(out T item)
 #endif
@@ -88,8 +88,8 @@
             }
         }
 
-#if NET5_0_OR_GREATER
-        public bool TryTake([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out T? item, int millisecondsTimeout)
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
+        public bool TryTake([System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out T item, int millisecondsTimeout)
 #else
         public bool TryTake(out T item, int millisecondsTimeout)
 #endif
