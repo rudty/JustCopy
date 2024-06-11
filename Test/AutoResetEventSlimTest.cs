@@ -1,10 +1,8 @@
 namespace Test;
 
-using System.Collections.Concurrent;
+using JustCopy;
 using System.Diagnostics;
 using Xunit.Abstractions;
-using JustCopy;
-using System.Runtime.CompilerServices;
 
 public class AutoResetEventSlimTest
 {
