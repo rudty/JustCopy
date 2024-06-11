@@ -1,7 +1,9 @@
 ﻿namespace JustCopy
 {
     using System;
+    using System.Collections;
     using System.Collections.Concurrent;
+    using System.Collections.Generic;
     using System.Diagnostics;
     using System.Runtime.CompilerServices;
     using System.Threading;
@@ -12,16 +14,13 @@
     /// </summary>
     public sealed class BlockingCollectionSlim<T>
     {
-        private readonly ConcurrentQueue<T> queue = new ConcurrentQueue<T>();
-        private readonly object lockObject = new object();
+        private readonly IProducerConsumerCollection<T> queue;
+        private readonly object takeLock = new object();
+        private int waitThreadCount = 0;
 
         public int SpinCount { get; set; } = 10;
 
-        private int count;
-
-        public int Count => count;
-
-        private readonly int addNoPulseCount;
+        public int Count => queue.Count;
 
         public BlockingCollectionSlim(int unsafeConsumeThreadCount = int.MaxValue)
         {
@@ -29,51 +28,45 @@
             {
                 throw new ArgumentException($"{nameof(unsafeConsumeThreadCount)}({unsafeConsumeThreadCount}) < 1");
             }
-            
-            var localAddNoPulseCount = unsafeConsumeThreadCount * 2L;
-            if (localAddNoPulseCount > int.MaxValue)
-            {
-                localAddNoPulseCount = int.MaxValue;
-            }
 
-            addNoPulseCount = (int)localAddNoPulseCount;
+            if (unsafeConsumeThreadCount == 1)
+            {
+                queue = new MpscLinkedQueue<T>();
+            }
+            else
+            {
+                queue = new ConcurrentQueue<T>();
+            }
         }
 
         public void Add(T item)
         {
-            queue.Enqueue(item);
-            var oldCount = Interlocked.Increment(ref count);
-            if (oldCount > addNoPulseCount)
-            {
-                return;
-            }
+            queue.TryAdd(item);
 
-            lock (lockObject)
+            if (waitThreadCount > 0)
             {
-                Monitor.Pulse(lockObject);
+                lock (takeLock)
+                {
+                    if (Volatile.Read(ref waitThreadCount) > 0)
+                    {
+                        Monitor.Pulse(takeLock);
+                    }
+                }
             }
         }
 
+        public bool TryTake(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        public bool TryTake([System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out T item)
-#else
-        public bool TryTake(out T item)
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
 #endif
+            out T item)
         {
-            var localCount = Volatile.Read(ref count);
-            if (localCount > 0)
+            if (queue.TryTake(out item))
             {
-                if (queue.TryDequeue(out item))
-                {
-                    _ = Interlocked.Decrement(ref count);
-                    return true;
-                }
-            }
-            else
-            {
-                item = default;
+                return true;
             }
 
+            item = default;
             return false;
         }
 
@@ -88,11 +81,11 @@
             }
         }
 
+        public bool TryTake(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        public bool TryTake([System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out T item, int millisecondsTimeout)
-#else
-        public bool TryTake(out T item, int millisecondsTimeout)
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
+            out T item, int millisecondsTimeout)
         {
             if (TryTake(out item))
             {
@@ -148,7 +141,7 @@
                 }
             }
 #endif
-            lock (lockObject)
+            lock (takeLock)
             {
                 while (true)
                 {
@@ -163,19 +156,29 @@
 
                     if (TryTake(out item))
                     {
+                        if (waitThreadCount > 0)
+                        {
+                            Monitor.Pulse(takeLock);
+                        }
+
                         return true;
                     }
 
-                    if (!Monitor.Wait(lockObject, remainTimeout))
+                    waitThreadCount += 1;
+
+                    if (!Monitor.Wait(takeLock, remainTimeout))
                     {
+                        waitThreadCount -= 1;
                         return false;
                     }
+
+                    waitThreadCount -= 1;
                 }
             }
         }
     }
 
-    public class BlockingCollectionSlimCompanion
+    public static class BlockingCollectionSlimCompanion
     {
         private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
 
@@ -206,6 +209,142 @@
             var currentTimeStamp = Stopwatch.GetTimestamp();
             var elapsedTimeStamp = currentTimeStamp - startTimeStamp;
             return unchecked((long)(elapsedTimeStamp * tickFrequency)) / TimeSpan.TicksPerMillisecond;
+        }
+    }
+
+    internal sealed class MpscLinkedQueueNode<T>
+    {
+        internal T item;
+        internal volatile MpscLinkedQueueNode<T> next;
+
+        public MpscLinkedQueueNode(T item, MpscLinkedQueueNode<T> next)
+        {
+            this.item = item;
+            this.next = next;
+        }
+    }
+
+    public sealed class MpscLinkedQueue<T> : IProducerConsumerCollection<T>
+    {
+        // https://www.1024cores.net/home/lock-free-algorithms/queues/non-intrusive-mpsc-node-based-queue
+
+        private volatile MpscLinkedQueueNode<T> head;
+        private MpscLinkedQueueNode<T> tail;
+
+        public MpscLinkedQueue()
+        {
+            head = tail = new MpscLinkedQueueNode<T>(default, null);
+        }
+
+        public int Count
+        {
+            get
+            {
+                var c = 0;
+                var currentNext = tail.next;
+                while (currentNext != null)
+                {
+                    currentNext = currentNext.next;
+                    c += 1;
+                }
+
+                return c;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool TryEnqueue(T item)
+        {
+            var newNode = new MpscLinkedQueueNode<T>(item, null);
+            return EnqueueInternal(newNode);
+        }
+
+        public void Enqueue(T item)
+        {
+            var newNode = new MpscLinkedQueueNode<T>(item, null);
+            while (true)
+            {
+                if (EnqueueInternal(newNode))
+                {
+                    break;
+                }
+            }
+        }
+
+        private bool EnqueueInternal(MpscLinkedQueueNode<T> newNode)
+        {
+            var currentHead = head;
+            if (Interlocked.CompareExchange(ref head, newNode, currentHead) == currentHead)
+            {
+                currentHead.next = newNode;
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TryDequeue(
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
+#endif
+        out T item)
+        {
+            var currentNext = tail.next;
+            if (currentNext != null)
+            {
+                tail = currentNext;
+                item = currentNext.item!;
+                if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+                {
+                    Debug.Assert(currentNext.item != null, "item is null");
+                    currentNext.item = default;
+                }
+
+                return true;
+            }
+
+            item = default;
+            return false;
+        }
+
+        IEnumerator<T> IEnumerable<T>.GetEnumerator()
+        {
+            throw new NotImplementedException();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            throw new NotImplementedException();
+        }
+
+        void ICollection.CopyTo(Array array, int index)
+        {
+            throw new NotImplementedException();
+        }
+
+        bool ICollection.IsSynchronized => throw new NotImplementedException();
+
+        object ICollection.SyncRoot => throw new NotImplementedException();
+
+        void IProducerConsumerCollection<T>.CopyTo(T[] array, int index)
+        {
+            throw new NotImplementedException();
+        }
+
+        T[] IProducerConsumerCollection<T>.ToArray()
+        {
+            throw new NotImplementedException();
+        }
+
+        bool IProducerConsumerCollection<T>.TryAdd(T item)
+        {
+            Enqueue(item);
+            return true;
+        }
+
+        bool IProducerConsumerCollection<T>.TryTake(out T item)
+        {
+            return TryDequeue(out item);
         }
     }
 }
