@@ -304,7 +304,7 @@
                 if (IsReference)
 #endif
                 {
-                    Debug.Assert(currentNext.item != null, "item is null");
+                    Debug.Assert(((object)currentNext.item) != null, "item is null");
                     currentNext.item = default;
                 }
 
