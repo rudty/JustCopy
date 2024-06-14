@@ -43,14 +43,11 @@
         {
             queue.TryAdd(item);
 
-            if (waitThreadCount > 0)
+            if (Volatile.Read(ref waitThreadCount) > 0)
             {
                 lock (takeLock)
                 {
-                    if (Volatile.Read(ref waitThreadCount) > 0)
-                    {
-                        Monitor.Pulse(takeLock);
-                    }
+                    Monitor.Pulse(takeLock);
                 }
             }
         }
@@ -164,15 +161,19 @@
                         return true;
                     }
 
-                    waitThreadCount += 1;
+                    Interlocked.Increment(ref waitThreadCount);
 
-                    if (!Monitor.Wait(takeLock, remainTimeout))
+                    try
                     {
-                        waitThreadCount -= 1;
-                        return false;
+                        if (!Monitor.Wait(takeLock, remainTimeout))
+                        {
+                            return false;
+                        }
                     }
-
-                    waitThreadCount -= 1;
+                    finally
+                    {
+                        Interlocked.Decrement(ref waitThreadCount);
+                    }
                 }
             }
         }
@@ -282,7 +283,10 @@
 
             return false;
         }
-
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
+#else
+        private static readonly bool IsReference = typeof(T).IsClass || typeof(T).IsInterface;
+#endif
         public bool TryDequeue(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
             [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
@@ -293,8 +297,12 @@
             if (currentNext != null)
             {
                 tail = currentNext;
-                item = currentNext.item!;
+                item = currentNext.item;
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
                 if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+#else
+                if (IsReference)
+#endif
                 {
                     Debug.Assert(currentNext.item != null, "item is null");
                     currentNext.item = default;
