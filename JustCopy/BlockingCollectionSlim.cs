@@ -38,7 +38,7 @@ namespace JustCopy
 
             if (unsafeConsumeThreadCount == 1)
             {
-                queue = new MpscLinkedQueue<T>();
+                queue = new BlockingCollectionSlimMpscLinkedQueue<T>();
             }
             else
             {
@@ -220,28 +220,28 @@ namespace JustCopy
         }
     }
 
-    internal sealed class MpscLinkedQueueNode<T>
+    internal sealed class BlockingCollectionSlimMpscLinkedQueueNode<T>
     {
         internal T item;
-        internal volatile MpscLinkedQueueNode<T> next;
+        internal volatile BlockingCollectionSlimMpscLinkedQueueNode<T> next;
 
-        public MpscLinkedQueueNode(T item, MpscLinkedQueueNode<T> next)
+        public BlockingCollectionSlimMpscLinkedQueueNode(T item, BlockingCollectionSlimMpscLinkedQueueNode<T> next)
         {
             this.item = item;
             this.next = next;
         }
     }
 
-    public sealed class MpscLinkedQueue<T> : IProducerConsumerCollection<T>
+    public sealed class BlockingCollectionSlimMpscLinkedQueue<T> : IProducerConsumerCollection<T>
     {
         // https://www.1024cores.net/home/lock-free-algorithms/queues/non-intrusive-mpsc-node-based-queue
 
-        private volatile MpscLinkedQueueNode<T> head;
-        private MpscLinkedQueueNode<T> tail;
+        private volatile BlockingCollectionSlimMpscLinkedQueueNode<T> head;
+        private BlockingCollectionSlimMpscLinkedQueueNode<T> tail;
 
-        public MpscLinkedQueue()
+        public BlockingCollectionSlimMpscLinkedQueue()
         {
-            head = tail = new MpscLinkedQueueNode<T>(default, null);
+            head = tail = new BlockingCollectionSlimMpscLinkedQueueNode<T>(default, null);
         }
 
         public int Count
@@ -263,13 +263,13 @@ namespace JustCopy
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryEnqueue(T item)
         {
-            var newNode = new MpscLinkedQueueNode<T>(item, null);
+            var newNode = new BlockingCollectionSlimMpscLinkedQueueNode<T>(item, null);
             return EnqueueInternal(newNode);
         }
 
         public void Enqueue(T item)
         {
-            var newNode = new MpscLinkedQueueNode<T>(item, null);
+            var newNode = new BlockingCollectionSlimMpscLinkedQueueNode<T>(item, null);
             while (true)
             {
                 if (EnqueueInternal(newNode))
@@ -279,7 +279,7 @@ namespace JustCopy
             }
         }
 
-        private bool EnqueueInternal(MpscLinkedQueueNode<T> newNode)
+        private bool EnqueueInternal(BlockingCollectionSlimMpscLinkedQueueNode<T> newNode)
         {
             var currentHead = head;
             if (Interlocked.CompareExchange(ref head, newNode, currentHead) == currentHead)
@@ -296,7 +296,7 @@ namespace JustCopy
 #endif
         public bool TryDequeue(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
+        [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
         out T item)
         {
@@ -306,7 +306,7 @@ namespace JustCopy
                 tail = currentNext;
                 item = currentNext.item;
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-                if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+            if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
 #else
                 if (IsReference)
 #endif
