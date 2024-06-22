@@ -1,4 +1,11 @@
-﻿namespace JustCopy
+﻿#pragma warning disable IDE0007
+#pragma warning disable IDE2003
+#pragma warning disable IDE0090
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
+#nullable disable
+#endif
+
+namespace JustCopy
 {
     using System;
     using System.Collections;
@@ -16,7 +23,7 @@
     {
         private readonly IProducerConsumerCollection<T> queue;
         private readonly object takeLock = new object();
-        private int waitThreadCount = 0;
+        private int waitThreadCount;
 
         public int SpinCount { get; set; } = 10;
 
@@ -151,20 +158,20 @@
                         }
                     }
 
-                    if (TryTake(out item))
-                    {
-                        if (waitThreadCount > 0)
-                        {
-                            Monitor.Pulse(takeLock);
-                        }
-
-                        return true;
-                    }
-
-                    Interlocked.Increment(ref waitThreadCount);
+                    var currentWaitThreadCount = Interlocked.Increment(ref waitThreadCount); 
 
                     try
                     {
+                        if (TryTake(out item))
+                        {
+                            if (currentWaitThreadCount > 1)
+                            {
+                                Monitor.Pulse(takeLock);
+                            }
+
+                            return true;
+                        }
+
                         if (!Monitor.Wait(takeLock, remainTimeout))
                         {
                             return false;
