@@ -2,12 +2,23 @@
 
 using JustCopy;
 
-public class MpscBlockingCollectionSlimTest
+public class MpscBlockingQueueTest
 {
+    public static int GetPopCount<T>(MpscBlockingQueue<T> c)
+    {
+        var count = 0;
+        while (c.TryTake(out _))
+        {
+            count += 1;
+        }
+
+        return  count;
+    }
+
     [Fact]
     public void AddAndTake()
     {
-        var collection = new BlockingCollectionSlim<int>();
+        var collection = new MpscBlockingQueue<int>();
         for (var i = 0; i < 10; ++i)
         {
             collection.Add(i);
@@ -19,13 +30,13 @@ public class MpscBlockingCollectionSlimTest
             Assert.Equal(i, takeValue);
         }
 
-        Assert.Equal(0, collection.Count);
+        Assert.Equal(0, GetPopCount(collection));
     }
 
     [Fact]
     public void AddAndTryTake()
     {
-        var collection = new BlockingCollectionSlim<int>();
+        var collection = new MpscBlockingQueue<int>();
         for (var i = 0; i < 10; ++i)
         {
             collection.Add(i);
@@ -38,13 +49,13 @@ public class MpscBlockingCollectionSlimTest
             Assert.Equal(i, takeValue);
         }
 
-        Assert.Equal(0, collection.Count);
+        Assert.Equal(0, GetPopCount(collection));
     }
 
     [Fact]
     public void SingleConsumerMultiProducer()
     {
-        var collection = new BlockingCollectionSlim<int>();
+        var collection = new MpscBlockingQueue<int>();
 
         var t1 = new Thread(() =>
         {
@@ -87,6 +98,6 @@ public class MpscBlockingCollectionSlimTest
 
         const int expectSum = (30000 * 29999) / 2;
         Assert.Equal(expectSum, outSum);
-        Assert.Equal(0, collection.Count);
+        Assert.Equal(0, GetPopCount(collection));
     }
 }
