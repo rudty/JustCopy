@@ -158,7 +158,7 @@ namespace JustCopy
                         }
                     }
 
-                    var currentWaitThreadCount = Interlocked.Increment(ref waitThreadCount); 
+                    var currentWaitThreadCount = Interlocked.Increment(ref waitThreadCount);
 
                     try
                     {
