@@ -8,83 +8,100 @@
 namespace JustCopy
 {
     using System;
-    using System.Collections;
     using System.Collections.Concurrent;
-    using System.Collections.Generic;
     using System.Diagnostics;
     using System.Runtime.CompilerServices;
     using System.Threading;
 
     /// <summary>
+    /// BlockingCollection의 잠금 경합을 피하기 위해 ConcurrentQueue와 Monitor를 사용하는 고성능 블로킹 컬렉션 대안입니다.
     /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
     /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
     /// </summary>
     public sealed class BlockingCollectionSlim<T>
     {
-        private readonly IProducerConsumerCollection<T> queue;
+        private readonly ConcurrentQueue<T> queue = new ConcurrentQueue<T>();
         private readonly object takeLock = new object();
-        private int waitThreadCount;
+        private volatile int waitingConsumers = 0;
 
+        // 초기 스피닝(SpinLock) 횟수. 경합이 낮을 때 컨텍스트 스위칭을 피합니다.
         public int SpinCount { get; set; } = 10;
 
         public int Count => queue.Count;
 
-        public BlockingCollectionSlim(int unsafeConsumeThreadCount = int.MaxValue)
-        {
-            if (unsafeConsumeThreadCount < 1)
-            {
-                throw new ArgumentException($"{nameof(unsafeConsumeThreadCount)}({unsafeConsumeThreadCount}) < 1");
-            }
-
-            if (unsafeConsumeThreadCount == 1)
-            {
-                queue = new BlockingCollectionSlimMpscLinkedQueue<T>();
-            }
-            else
-            {
-                queue = new ConcurrentQueue<T>();
-            }
-        }
-
+        /// <summary>
+        /// 항목을 큐에 추가하고, 대기 중인 단일 소비자에게 신호를 보냅니다.
+        /// </summary>
         public void Add(T item)
         {
-            queue.TryAdd(item);
-
-            if (Volatile.Read(ref waitThreadCount) > 0)
+            queue.Enqueue(item);
+            // --- 싱글 스레드 성능 개선 로직 ---
+            // 대기 중인 소비자(waitingConsumers > 0)가 있을 때만 lock을 잡고 Monitor.Pulse를 호출합니다.
+            // 대기 중인 스레드가 없으면 lock/Pulse 오버헤드를 완전히 피할 수 있습니다.
+            if (waitingConsumers > 0)
             {
                 lock (takeLock)
                 {
                     Monitor.Pulse(takeLock);
                 }
             }
+            // ------------------------------------
         }
 
+        /// <summary>
+        /// 큐에서 항목을 즉시 가져오려고 시도합니다.
+        /// </summary>
         public bool TryTake(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
             [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
 #endif
             out T item)
         {
-            if (queue.TryTake(out item))
-            {
-                return true;
-            }
-
-            item = default;
-            return false;
+            return queue.TryDequeue(out item);
         }
 
+        /// <summary>
+        /// 큐가 비어 있으면 항목이 사용 가능해질 때까지 무기한으로 블로킹합니다.
+        /// </summary>
         public T Take()
         {
-            while (true)
+            // 1. 비잠금 경로: 큐에 항목이 있다면 바로 반환
+            if (TryTake(out var item))
             {
-                if (TryTake(out var item, Timeout.Infinite))
+                return item;
+            }
+
+            // 2. 잠금 및 대기 경로: 항목이 없으면 lock을 잡고 대기
+            lock (takeLock)
+            {
+                // Monitor.Wait을 호출하기 전에 대기 중인 소비자 수를 증가시킵니다.
+                Interlocked.Increment(ref waitingConsumers);
+
+                try
                 {
-                    return item;
+                    while (true)
+                    {
+                        // Monitor.Wait 전에 항목을 다시 확인 (Lost Pulse 방지)
+                        if (TryTake(out item))
+                        {
+                            return item;
+                        }
+
+                        // 대기: 신호가 들어올 때까지 잠듦 (무기한)
+                        Monitor.Wait(takeLock);
+                    }
+                }
+                finally
+                {
+                    // Monitor.Wait이 끝난 후 (항목을 가져갔든, 예외로 종료되었든) 소비자 수를 감소시킵니다.
+                    Interlocked.Decrement(ref waitingConsumers);
                 }
             }
         }
 
+        /// <summary>
+        /// 큐가 비어 있으면 지정된 타임아웃 시간 동안 항목을 가져오기 위해 블로킹합니다.
+        /// </summary>
         public bool TryTake(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
             [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
@@ -147,46 +164,48 @@ namespace JustCopy
 #endif
             lock (takeLock)
             {
-                while (true)
+                // Monitor.Wait을 호출하기 전에 대기 중인 소비자 수를 증가시킵니다.
+                Interlocked.Increment(ref waitingConsumers);
+
+                try
                 {
-                    if (useTimeout)
+                    while (true)
                     {
-                        remainTimeout = BlockingCollectionSlimCompanion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
-                        if (remainTimeout <= 0)
+                        // 3-1. 타임아웃 시간 갱신
+                        if (useTimeout)
                         {
-                            return false;
+                            remainTimeout = Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                            if (remainTimeout <= 0)
+                            {
+                                return false; // 타임아웃 만료
+                            }
                         }
-                    }
 
-                    var currentWaitThreadCount = Interlocked.Increment(ref waitThreadCount);
-
-                    try
-                    {
+                        // 3-2. Monitor.Wait 전에 항목을 다시 확인
                         if (TryTake(out item))
                         {
-                            if (currentWaitThreadCount > 1)
-                            {
-                                Monitor.Pulse(takeLock);
-                            }
-
                             return true;
                         }
 
+                        // 3-3. 대기
                         if (!Monitor.Wait(takeLock, remainTimeout))
                         {
-                            return false;
+                            return false; // 타임아웃 발생 (Monitor.Wait이 false 반환)
                         }
+
+                        // 신호가 들어왔으면 루프를 반복하여 TryTake 재시도
                     }
-                    finally
-                    {
-                        Interlocked.Decrement(ref waitThreadCount);
-                    }
+                }
+                finally
+                {
+                    // Monitor.Wait이 끝난 후 소비자 수를 감소시킵니다.
+                    Interlocked.Decrement(ref waitingConsumers);
                 }
             }
         }
     }
 
-    public static class BlockingCollectionSlimCompanion
+    static class Companion
     {
         private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
 
@@ -217,149 +236,6 @@ namespace JustCopy
             var currentTimeStamp = Stopwatch.GetTimestamp();
             var elapsedTimeStamp = currentTimeStamp - startTimeStamp;
             return unchecked((long)(elapsedTimeStamp * tickFrequency)) / TimeSpan.TicksPerMillisecond;
-        }
-    }
-
-    internal sealed class BlockingCollectionSlimMpscLinkedQueueNode<T>
-    {
-        internal T item;
-        internal volatile BlockingCollectionSlimMpscLinkedQueueNode<T> next;
-
-        public BlockingCollectionSlimMpscLinkedQueueNode(T item, BlockingCollectionSlimMpscLinkedQueueNode<T> next)
-        {
-            this.item = item;
-            this.next = next;
-        }
-    }
-
-    public sealed class BlockingCollectionSlimMpscLinkedQueue<T> : IProducerConsumerCollection<T>
-    {
-        // https://www.1024cores.net/home/lock-free-algorithms/queues/non-intrusive-mpsc-node-based-queue
-
-        private volatile BlockingCollectionSlimMpscLinkedQueueNode<T> head;
-        private BlockingCollectionSlimMpscLinkedQueueNode<T> tail;
-
-        public BlockingCollectionSlimMpscLinkedQueue()
-        {
-            head = tail = new BlockingCollectionSlimMpscLinkedQueueNode<T>(default, null);
-        }
-
-        public int Count
-        {
-            get
-            {
-                var c = 0;
-                var currentNext = tail.next;
-                while (currentNext != null)
-                {
-                    currentNext = currentNext.next;
-                    c += 1;
-                }
-
-                return c;
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool TryEnqueue(T item)
-        {
-            var newNode = new BlockingCollectionSlimMpscLinkedQueueNode<T>(item, null);
-            return EnqueueInternal(newNode);
-        }
-
-        public void Enqueue(T item)
-        {
-            var newNode = new BlockingCollectionSlimMpscLinkedQueueNode<T>(item, null);
-            while (true)
-            {
-                if (EnqueueInternal(newNode))
-                {
-                    break;
-                }
-            }
-        }
-
-        private bool EnqueueInternal(BlockingCollectionSlimMpscLinkedQueueNode<T> newNode)
-        {
-            var currentHead = head;
-            if (Interlocked.CompareExchange(ref head, newNode, currentHead) == currentHead)
-            {
-                currentHead.next = newNode;
-                return true;
-            }
-
-            return false;
-        }
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-#else
-        private static readonly bool IsReference = typeof(T).IsClass || typeof(T).IsInterface;
-#endif
-        public bool TryDequeue(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
-#endif
-        out T item)
-        {
-            var currentNext = tail.next;
-            if (currentNext != null)
-            {
-                tail = currentNext;
-                item = currentNext.item;
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
-#else
-                if (IsReference)
-#endif
-                {
-                    Debug.Assert(((object)currentNext.item) != null, "item is null");
-                    currentNext.item = default;
-                }
-
-                return true;
-            }
-
-            item = default;
-            return false;
-        }
-
-        IEnumerator<T> IEnumerable<T>.GetEnumerator()
-        {
-            throw new NotImplementedException();
-        }
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            throw new NotImplementedException();
-        }
-
-        void ICollection.CopyTo(Array array, int index)
-        {
-            throw new NotImplementedException();
-        }
-
-        bool ICollection.IsSynchronized => throw new NotImplementedException();
-
-        object ICollection.SyncRoot => throw new NotImplementedException();
-
-        void IProducerConsumerCollection<T>.CopyTo(T[] array, int index)
-        {
-            throw new NotImplementedException();
-        }
-
-        T[] IProducerConsumerCollection<T>.ToArray()
-        {
-            throw new NotImplementedException();
-        }
-
-        bool IProducerConsumerCollection<T>.TryAdd(T item)
-        {
-            Enqueue(item);
-            return true;
-        }
-
-        bool IProducerConsumerCollection<T>.TryTake(out T item)
-        {
-            return TryDequeue(out item);
         }
     }
 }
