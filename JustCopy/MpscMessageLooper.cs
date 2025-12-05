@@ -57,8 +57,7 @@ namespace JustCopy
         /// <summary>
         /// Consumer 루프를 시작하고 큐 항목이 도착할 때까지 효율적으로 대기합니다.
         /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public virtual async Task Start(
+        public virtual async ValueTask Start(
             CancellationToken cancellation,
             bool schedulingContext = true,
             bool captureExecutionContext = true)
@@ -264,6 +263,7 @@ namespace JustCopy
         /// 다음 Continuation을 실행하며, 캡처된 ExecutionContext를 사용합니다.
         /// 이 메서드는 'signaled'가 1로 설정된 후에만 호출되어야 합니다.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void InvokeNext()
         {
             // 등록된 Action을 가져오고 'next' 슬롯을 비웁니다.
