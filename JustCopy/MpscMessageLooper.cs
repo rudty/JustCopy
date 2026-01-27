@@ -57,7 +57,7 @@ namespace JustCopy
         /// <summary>
         /// Consumer 루프를 시작하고 큐 항목이 도착할 때까지 효율적으로 대기합니다.
         /// </summary>
-        public virtual async ValueTask Start(
+        public virtual async Task Start(
             CancellationToken cancellation,
             bool schedulingContext = true,
             bool captureExecutionContext = true)
@@ -392,16 +392,8 @@ namespace JustCopy
         internal void Enqueue(T item)
         {
             var newNode = new MpscAsyncLinkedQueueNode<T>(item, null);
-            while (true)
-            {
-                var currentHead = head;
-                if (Interlocked.CompareExchange(ref head, newNode, currentHead) == currentHead)
-                {
-                    currentHead.next = newNode;
-                    Thread.MemoryBarrier();
-                    return;
-                }
-            }
+            var prevHead = Interlocked.Exchange(ref head, newNode);
+            prevHead.next = newNode;
         }
 
         internal bool TryDequeue(
