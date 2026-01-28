@@ -65,29 +65,51 @@ namespace JustCopy
             // Awaiter 실행 환경 설정
             task.RegisterConsumerMessageExecutor(schedulingContext, captureExecutionContext);
 
-            while (!cancellation.IsCancellationRequested)
+            using (var registration = cancellation.Register(t => (t as RecycleTask).Complete(), task))
             {
-                // 1. 큐의 모든 항목을 처리하는 고속 경로
-                while (taskQueue.TryDequeue(out var v1))
+                _ = registration; // ignore warn
+                while (true)
                 {
-                    // 항목 처리 로직 실행
-                    ExecuteItemHandler(v1);
+                    // 1. 큐의 모든 항목을 처리하는 고속 경로
+                    while (taskQueue.TryDequeue(out var v1))
+                    {
+                        // 항목 처리 로직 실행
+                        ExecuteItemHandler(v1);
+                    }
+
+                    // 2. 대기 상태로 전환 준비 (RecycleTask.signaled = 0)
+                    task.Reset();
+
+                    // 2-1. 취소 요청 시 종료
+                    if (cancellation.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    // 3. 방어적인 재확인 (Lost Wakeup 방어): Reset()과 await task 사이에 도착한 항목이 있는지 확인
+                    if (taskQueue.TryDequeue(out var v2))
+                    {
+                        ExecuteItemHandler(v2);
+
+                        // 항목이 있다면 잠들지 않고 다시 1단계로 돌아가 처리
+                        continue;
+                    }
+
+                    // 4. 대기: 큐가 비었고, 신호 누락이 없음을 확인했을 때만 잠듦
+
+                    if (task.IsCompleted)
+                    {
+                        continue;
+                    }
+
+                    await task;
                 }
+            }
 
-                // 2. 대기 상태로 전환 준비 (RecycleTask.signaled = 0)
-                task.Reset();
-
-                // 3. 방어적인 재확인 (Lost Wakeup 방어): Reset()과 await task 사이에 도착한 항목이 있는지 확인
-                if (taskQueue.TryDequeue(out var v2))
-                {
-                    ExecuteItemHandler(v2);
-
-                    // 항목이 있다면 잠들지 않고 다시 1단계로 돌아가 처리
-                    continue;
-                }
-
-                // 4. 대기: 큐가 비었고, 신호 누락이 없음을 확인했을 때만 잠듦
-                await task;
+            // 5. 종료 전 남은 항목 처리
+            while (taskQueue.TryDequeue(out var v3))
+            {
+                ExecuteItemHandler(v3);
             }
         }
 
@@ -113,9 +135,9 @@ namespace JustCopy
         }
     }
 
-// ======================================================================
-// Execution Context Handling (MessageExecutor Hierarchy)
-// ======================================================================
+    // ======================================================================
+    // Execution Context Handling (MessageExecutor Hierarchy)
+    // ======================================================================
     internal abstract class MessageExecutorBase
     {
         private ExecutionContext executionContext;
