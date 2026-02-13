@@ -381,11 +381,19 @@ namespace JustCopy
         /// <summary>Number of arrays stored in <see cref="_arrays"/>.</summary>
         private int _count;
 
+#if NET10_0_OR_GREATER
+        private readonly System.Threading.Lock _lock = new ();
+#endif
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryPush(IntPtr array)
         {
             var enqueued = false;
+#if NET10_0_OR_GREATER
+            _lock.Enter();
+#else
             Monitor.Enter(this);
+#endif
             var arrays = _arrays;
             var count = _count;
             if ((uint)count < (uint)arrays.Length)
@@ -399,8 +407,11 @@ namespace JustCopy
                 _count = count + 1;
                 enqueued = true;
             }
-
+#if NET10_0_OR_GREATER
+            _lock.Exit();
+#else
             Monitor.Exit(this);
+#endif
             return enqueued;
         }
 
@@ -408,7 +419,11 @@ namespace JustCopy
         public IntPtr TryPop()
         {
             var arr = IntPtr.Zero;
+#if NET10_0_OR_GREATER
+            _lock.Enter();
+#else
             Monitor.Enter(this);
+#endif
             var arrays = _arrays;
             var count = _count - 1;
             if ((uint)count < (uint)arrays.Length)
@@ -418,7 +433,11 @@ namespace JustCopy
                 _count = count;
             }
 
+#if NET10_0_OR_GREATER
+            _lock.Exit();
+#else
             Monitor.Exit(this);
+#endif
             return arr;
         }
     }
