@@ -1,6 +1,8 @@
 ﻿#pragma warning disable IDE0007
 #pragma warning disable IDE2003
 #pragma warning disable IDE0090
+#pragma warning disable IDE0161
+#pragma warning disable IDE0130
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
 #nullable disable
 #endif
@@ -22,7 +24,7 @@ namespace JustCopy
     {
         private readonly ConcurrentQueue<T> queue = new ConcurrentQueue<T>();
         private readonly object takeLock = new object();
-        private volatile int waitingConsumers = 0;
+        private volatile int waitingConsumers;
 
         // 초기 스피닝(SpinLock) 횟수. 경합이 낮을 때 컨텍스트 스위칭을 피합니다.
         public int SpinCount { get; set; } = 10;
