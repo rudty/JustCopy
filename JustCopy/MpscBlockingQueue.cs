@@ -1,6 +1,8 @@
 ﻿#pragma warning disable IDE0007
 #pragma warning disable IDE2003
 #pragma warning disable IDE0090
+#pragma warning disable IDE0161
+#pragma warning disable IDE0130
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
 #nullable disable
 #endif
@@ -14,6 +16,10 @@ namespace JustCopy
     using System.Threading;
 
     /// <summary>
+    /// Multiple-producer single-consumer (MPSC) blocking queue.
+    /// Note: T must be non-null reference when T is reference type — Add(null) throws.
+    /// Only a single consumer may call Take/TryTake concurrently.
+    /// -
     /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
     /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
     /// </summary>
@@ -22,15 +28,25 @@ namespace JustCopy
         private readonly MpscBlockingQueueLinkedQueue<T> queue = new MpscBlockingQueueLinkedQueue<T>();
         private readonly object takeLock = new object();
 
+        private int waiters;
+
         public int SpinCount { get; set; } = 10;
 
         public void Add(T item)
         {
+            if (item == null)
+            {
+                throw new ArgumentNullException(nameof(item));
+            }
+            
             queue.Enqueue(item);
 
-            lock (takeLock)
+            if (Volatile.Read(ref waiters) > 0)
             {
-                Monitor.Pulse(takeLock);
+                lock (takeLock)
+                {
+                    Monitor.Pulse(takeLock);
+                }
             }
         }
 
@@ -60,12 +76,21 @@ namespace JustCopy
             {
                 while (true)
                 {
-                    if (TryTake(out item))
+                    try
                     {
-                        return item;
-                    }
+                        Interlocked.Increment(ref waiters);
 
-                    Monitor.Wait(takeLock);
+                        if (TryTake(out item))
+                        {
+                            return item;
+                        }
+
+                        Monitor.Wait(takeLock);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref waiters);
+                    }
                 }
             }
         }
@@ -143,14 +168,23 @@ namespace JustCopy
                         }
                     }
 
-                    if (TryTake(out item))
+                    try
                     {
-                        return true;
-                    }
+                        Interlocked.Increment(ref waiters);
 
-                    if (!Monitor.Wait(takeLock, remainTimeout))
+                        if (TryTake(out item))
+                        {
+                            return true;
+                        }
+
+                        if (!Monitor.Wait(takeLock, remainTimeout))
+                        {
+                            return false;
+                        }
+                    }
+                    finally
                     {
-                        return false;
+                        Interlocked.Decrement(ref waiters);
                     }
                 }
             }
@@ -224,23 +258,20 @@ namespace JustCopy
 #pragma warning restore IDE0051
         internal MpscBlockingQueueLinkedQueue()
         {
-            head = tail = new MpscBlockingQueueLinkedQueueNode<T>(default, null);
+            head = tail = new MpscBlockingQueueLinkedQueueNode<T>(
+#pragma warning disable CS8604
+                default,
+#pragma warning restore CS8604
+                null);
         }
 
         internal void Enqueue(T item)
         {
             var newNode = new MpscBlockingQueueLinkedQueueNode<T>(item, null);
-            while (true)
-            {
-                var currentHead = head;
-                if (Interlocked.CompareExchange(ref head, newNode, currentHead) == currentHead)
-                {
-                    currentHead.next = newNode;
-                    Thread.MemoryBarrier();
-                    return;
-                }
-            }
+            var prevHead = Interlocked.Exchange(ref head, newNode);
+            prevHead.next = newNode;
         }
+
         private static readonly bool IsReferenceOrContainsReferences =
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
         RuntimeHelpers.IsReferenceOrContainsReferences<T>();
