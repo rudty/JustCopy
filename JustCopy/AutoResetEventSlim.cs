@@ -6,8 +6,16 @@
     using System.Threading;
 
     /// <summary>
-    /// AutoResetEvent 대신 사용 가능한 클래스
+    /// <see cref="AutoResetEventSlim"/> 은 <see cref="AutoResetEvent"/> 를 대체하여 사용할 수 있는 가벼운 이벤트 동기화 클래스입니다.
+    /// <para>커널 객체를 바로 생성하지 않고 스핀 대기를 활용하므로, 대부분의 상황에서 <see cref="AutoResetEvent"/> 보다 더 나은 성능을 제공합니다.</para> 
     /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><description>1 ~ 2개의 스레드 대기 상황에서는 대부분의 상황에서 <see cref="AutoResetEventSlim"/> 이 좋습니다</description></item>
+    /// <item><description>4개 이상의 스레드를 기다리는 상황에서는 <see cref="SemaphoreSlim"/> 을 사용하는 것이 더 좋은 성능을 보입니다</description></item>
+    /// <item><description>어느쪽이어도 <see cref="AutoResetEvent"/> 보다는 좋은 성능으로 작동합니다</description></item>
+    /// </list>
+    /// </remarks>
     public sealed class AutoResetEventSlim
     {
         private readonly object lockObject = new object();
@@ -16,9 +24,11 @@
         public int SpinCount { get; set; } = 10;
 
         private int isSet;
+        private int waiters;
 
-        public int IsSet => Volatile.Read(ref isSet);
+        public bool IsSet => Volatile.Read(ref isSet) == 1;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool TryAutoReset()
         {
             return Interlocked.Exchange(ref isSet, 0) == 1;
@@ -27,7 +37,13 @@
         public void Set()
         {
             var oldSet = Interlocked.Exchange(ref isSet, 1);
-            if (oldSet is 0)
+
+            if (oldSet == 1)
+            {
+                return;
+            }
+
+            if (Volatile.Read(ref waiters) > 0)
             {
                 lock (lockObject)
                 {
@@ -79,7 +95,7 @@
 #else
             for (var spin = 0; spin < spinCount; ++spin)
             {
-             
+
                 if (spin >= 10 && (spin & 1) == 0)
                 {
                     Thread.Yield();
@@ -96,27 +112,35 @@
 
             lock (lockObject)
             {
-                while (true)
+                Interlocked.Increment(ref waiters);
+                try
                 {
-
-                    if (useTimeout)
+                    while (true)
                     {
-                        remainTimeout = UpdateTimeOut(startTimeStamp, millisecondsTimeout);
-                        if (remainTimeout <= 0)
+
+                        if (useTimeout)
+                        {
+                            remainTimeout = UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                            if (remainTimeout <= 0)
+                            {
+                                return false;
+                            }
+                        }
+
+                        if (TryAutoReset())
+                        {
+                            return true;
+                        }
+
+                        if (!Monitor.Wait(lockObject, remainTimeout))
                         {
                             return false;
                         }
                     }
-
-                    if (TryAutoReset())
-                    {
-                        return true;
-                    }
-
-                    if (!Monitor.Wait(lockObject, remainTimeout))
-                    {
-                        return false;
-                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref waiters);
                 }
             }
         }
