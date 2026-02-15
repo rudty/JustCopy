@@ -141,6 +141,12 @@ namespace JustCopy
     internal abstract class MessageExecutorBase
     {
         private ExecutionContext executionContext;
+        private readonly Action<object> _executeContinuationDelegate;
+
+        protected MessageExecutorBase()
+        {
+            _executeContinuationDelegate = ExecuteContinuationWithContext;
+        }
 
         public void CaptureExecutionContext()
         {
@@ -149,7 +155,7 @@ namespace JustCopy
 
         public void Run(Action c)
         {
-            RunInternal(ExecuteContinuationWithContext, c);
+            RunInternal(_executeContinuationDelegate, c);
         }
 
         protected abstract void RunInternal(Action<object> action, object state);
