@@ -1,4 +1,9 @@
-﻿#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
+﻿#pragma warning disable IDE0090
+#pragma warning disable IDE0290
+#pragma warning disable IDE0161
+#pragma warning disable IDE0074
+
+#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 #nullable enable
 #endif
 
@@ -11,10 +16,10 @@ namespace JustCopy
     using System.Runtime.InteropServices;
     using System.Threading;
 
-    public struct NativeBuffer
+    public readonly struct NativeBuffer
     {
-        public IntPtr Pointer;
-        public int Capacity;
+        public readonly IntPtr Pointer;
+        public readonly int Capacity;
 
         public NativeBuffer(IntPtr pointer, int capacity)
         {
