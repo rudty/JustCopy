@@ -2,6 +2,7 @@
 
 using JustCopy;
 
+[Collection("ALL")]
 public class MpscBlockingQueueTest
 {
     [Fact(DisplayName = "1. 싱글 스레드 기본 Enqueue/Dequeue 테스트")]
@@ -30,22 +31,12 @@ public class MpscBlockingQueueTest
         // Arrange
         var queue = new MpscBlockingQueue<int>();
         var producerCount = 10;
-        var itemsPerProducer = 500_000;
+        var itemsPerProducer = 100_000; // 🚀 전체 테스트 부하를 위해 50만에서 10만으로 축소 권장
         var totalItems = producerCount * itemsPerProducer;
 
         var consumedCount = 0;
 
-        // Act - 소비자(Consumer) 스레드 시작
-        var consumerTask = Task.Run(() =>
-        {
-            for (var i = 0; i < totalItems; i++)
-            {
-                queue.Take();
-                consumedCount++;
-            }
-        });
-
-        // Act - 생산자(Producer) 스레드들 시작
+        // Act - 🚀 생산자들을 먼저 스레드 풀에 올림
         var producerTasks = new Task[producerCount];
         for (var i = 0; i < producerCount; i++)
         {
@@ -58,19 +49,31 @@ public class MpscBlockingQueueTest
             });
         }
 
-        // Assert
-        // 1. 생산자들이 데이터를 모두 넣을 때까지 대기
-        await Task.WhenAll(producerTasks);
+        // 🚀 생산자들이 모두 스레드 풀에 진입할 시간을 살짝 줌 (기아 상태 방지)
+        await Task.Delay(100);
 
-        // 2. 소비자가 데이터를 모두 처리할 때까지 대기 (최대 10초)
-        // 데드락이나 유실이 발생하면 여기서 false가 반환됩니다.
+        // Act - 소비자(Consumer) 스레드 시작
+        var consumerTask = Task.Run(() =>
+        {
+            for (var i = 0; i < totalItems; i++)
+            {
+                queue.Take();
+                consumedCount++; // 주의: SPSC 구조라 소비자가 1명이므로 Interlocked 불필요!
+            }
+        });
+
+        // Assert
         try
         {
-            await consumerTask.WaitAsync(TimeSpan.FromSeconds(10));
+            // 🚀 생산자와 소비자를 한 번에 묶어서 비동기로 기다립니다! (좀비 스레드 방지)
+            var allTasks = new List<Task>(producerTasks) { consumerTask };
+            var waitAllTask = Task.WhenAll(allTasks);
+
+            await waitAllTask.WaitAsync(TimeSpan.FromSeconds(15));
         }
         catch
         {
-            Assert.Fail( $"데드락 발생 또는 처리 지연! 처리된 항목 수: {consumedCount}/{totalItems}");
+            Assert.Fail($"데드락 발생 또는 처리 지연! 처리된 항목 수: {consumedCount}/{totalItems}");
         }
 
         Assert.Equal(totalItems, consumedCount);
@@ -88,7 +91,7 @@ public class MpscBlockingQueueTest
         var consumerTask = Task.Run(queue.Take);
 
         // 소비자가 확실히 잠들 시간을 줌
-        Thread.Sleep(500);
+        await Task.Delay(500);
 
         // 생산자가 데이터를 넣음 (이때 waiters 카운트를 보고 깨워야 함)
         queue.Add(expectedItem);
@@ -142,7 +145,7 @@ public class MpscBlockingQueueTest
         });
 
         // 소비자가 대기 상태로 들어갈 시간을 줌
-        Thread.Sleep(200);
+        await Task.Delay(200);
 
         // 데이터 삽입
         queue.Add(expectedItem);

@@ -16,17 +16,24 @@ namespace JustCopy
     using System.Threading;
 
     /// <summary>
-    /// BlockingCollection의 잠금 경합을 피하기 위해 ConcurrentQueue와 Monitor를 사용하는 고성능 블로킹 컬렉션 대안입니다.
-    /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
-    /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
+    /// <see cref="ConcurrentQueue{T}"/> 기반의 고성능 컬렉션입니다. <see cref="System.Collections.Concurrent.BlockingCollection{T}"/> 의 대안입니다.
     /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><description><see cref="System.Collections.Concurrent.BlockingCollection{T}"/>의 글로벌 잠금(Lock) 병목으로 인해 성능 저하가 발생할 때 대체하여 사용합니다.</description></item>
+    /// <item><description><b>작업 스레드가 1 ~ 2개 (저경합):</b> BlockingCollectionSlim 이 컨텍스트 스위칭 오버헤드가 적어 가장 높은 효율을 보여줍니다.</description></item>
+    /// <item><description><b>작업 스레드가 3 ~ 4개 (중간 경합):</b> System.Threading.Channels.Channel 비슷한 속도를 내기 시작하며, 메모리 할당량(GC) 측면에서는 MpmcLockBlockingQueue 가 압도적으로 우수합니다.</description></item>
+    /// <item><description><b>작업 스레드가 4개 이상 (고경합):</b> MpmcLockBlockingQueue 가 최고의 처리량을 제공합니다.</description></item>
+    /// <item><description>적용 후 실제 비즈니스 로직과 트래픽 환경에서 더 나은 성능으로 작동하는지 벤치마크 테스트를 수행하는 것을 권장합니다.</description></item>
+    /// </list>
+    /// </remarks>
     public sealed class BlockingCollectionSlim<T>
     {
         private readonly ConcurrentQueue<T> queue = new ConcurrentQueue<T>();
         private readonly object takeLock = new object();
-        private volatile int waitingConsumers;
+        private int waitingConsumers;
 
-        // 초기 스피닝(SpinLock) 횟수. 경합이 낮을 때 컨텍스트 스위칭을 피합니다.
+        // 초기 Take 시 (SpinLock) 횟수. 경합이 낮을 때 컨텍스트 스위칭을 피합니다.
         public int SpinCount { get; set; } = 10;
 
         public int Count => queue.Count;
@@ -40,7 +47,7 @@ namespace JustCopy
             // --- 싱글 스레드 성능 개선 로직 ---
             // 대기 중인 소비자(waitingConsumers > 0)가 있을 때만 lock을 잡고 Monitor.Pulse를 호출합니다.
             // 대기 중인 스레드가 없으면 lock/Pulse 오버헤드를 완전히 피할 수 있습니다.
-            if (waitingConsumers > 0)
+            if (Volatile.Read(ref waitingConsumers) > 0)
             {
                 lock (takeLock)
                 {
@@ -73,11 +80,27 @@ namespace JustCopy
                 return item;
             }
 
+            // Spin
+            var spinCount = SpinCount;
+            SpinWait spin = default;
+            while (spin.Count < spinCount)
+            {
+#if NETCOREAPP3_1_OR_GREATER
+                spin.SpinOnce(sleep1Threshold: -1);
+＃else
+                spin.SpinOnce();
+#endif
+                if (TryTake(out item))
+                {
+                    return item;
+                }
+            }
+
             // 2. 잠금 및 대기 경로: 항목이 없으면 lock을 잡고 대기
             lock (takeLock)
             {
                 // Monitor.Wait을 호출하기 전에 대기 중인 소비자 수를 증가시킵니다.
-                Interlocked.Increment(ref waitingConsumers);
+                Volatile.Write(ref waitingConsumers, waitingConsumers + 1);
 
                 try
                 {
@@ -96,7 +119,7 @@ namespace JustCopy
                 finally
                 {
                     // Monitor.Wait이 끝난 후 (항목을 가져갔든, 예외로 종료되었든) 소비자 수를 감소시킵니다.
-                    Interlocked.Decrement(ref waitingConsumers);
+                    Volatile.Write(ref waitingConsumers, waitingConsumers - 1);
                 }
             }
         }
@@ -137,37 +160,24 @@ namespace JustCopy
 
             // Spin
             var spinCount = SpinCount;
-#if NETCOREAPP3_1_OR_GREATER
             SpinWait spin = default;
             while (spin.Count < spinCount)
             {
+#if NETCOREAPP3_1_OR_GREATER
                 spin.SpinOnce(sleep1Threshold: -1);
-
-                if (TryTake(out item))
-                {
-                    return true;
-                }
-            }
 #else
-            for (var spin = 0; spin < spinCount; ++spin)
-            {
-                if (spin >= 10 && (spin & 1) == 0)
-                {
-                    Thread.Yield();
-                }
-
-                Thread.SpinWait(1);
-
+                spin.SpinOnce();
+#endif
                 if (TryTake(out item))
                 {
                     return true;
                 }
             }
-#endif
+
             lock (takeLock)
             {
                 // Monitor.Wait을 호출하기 전에 대기 중인 소비자 수를 증가시킵니다.
-                Interlocked.Increment(ref waitingConsumers);
+                Volatile.Write(ref waitingConsumers, waitingConsumers + 1);
 
                 try
                 {
@@ -176,7 +186,7 @@ namespace JustCopy
                         // 3-1. 타임아웃 시간 갱신
                         if (useTimeout)
                         {
-                            remainTimeout = Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                            remainTimeout = BlockingCollectionSlim_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
                             if (remainTimeout <= 0)
                             {
                                 return false; // 타임아웃 만료
@@ -201,13 +211,13 @@ namespace JustCopy
                 finally
                 {
                     // Monitor.Wait이 끝난 후 소비자 수를 감소시킵니다.
-                    Interlocked.Decrement(ref waitingConsumers);
+                    Volatile.Write(ref waitingConsumers, waitingConsumers - 1);
                 }
             }
         }
     }
 
-    static class Companion
+    static class BlockingCollectionSlim_Companion
     {
         private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
 

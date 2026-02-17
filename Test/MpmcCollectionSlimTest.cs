@@ -4,26 +4,23 @@ using JustCopy;
 using System.Diagnostics;
 
 [Collection("ALL")]
-public class BlockingCollectionSlimTest
+public class MpmcCollectionSlimTest
 {
     [Fact(DisplayName = "1. [기본] 단일 스레드 Add, Take, TryTake 및 Count 동작 확인")]
     public void SingleThread_BasicOperations_WorkCorrectly()
     {
         // Arrange
-        var queue = new BlockingCollectionSlim<int>();
+        var queue = new MpmcLockBlockingQueue<int>();
 
         // Act & Assert
-        Assert.Equal(0, queue.Count);
 
         queue.Add(10);
         queue.Add(20);
-        Assert.Equal(2, queue.Count);
 
         Assert.True(queue.TryTake(out var item1));
         Assert.Equal(10, item1);
 
         Assert.Equal(20, queue.Take());
-        Assert.Equal(0, queue.Count);
 
         Assert.False(queue.TryTake(out var item3));
         Assert.Equal(0, item3);
@@ -33,7 +30,7 @@ public class BlockingCollectionSlimTest
     public async Task MPMC_StressTest_NoDataLoss_And_NoDeadlock()
     {
         // Arrange
-        var queue = new BlockingCollectionSlim<int>();
+        var queue = new MpmcLockBlockingQueue<int>();
         var workerCount = 8;        // 8쌍의 생산자/소비자
         var itemsPerWorker = 10_000; // 각 1만 개씩 (총 8만 개)
         var totalItems = workerCount * itemsPerWorker;
@@ -81,14 +78,13 @@ public class BlockingCollectionSlimTest
         }
 
         Assert.Equal(totalItems, consumedCount);
-        Assert.Equal(0, queue.Count);
     }
 
     [Fact(DisplayName = "3. [웨이크업] 대기 중인 소비자가 정확히 깨어나는지 검증 (Lost Pulse 방지)")]
     public async Task Take_BlocksAndWakesUp_WhenItemAdded()
     {
         // Arrange
-        var queue = new BlockingCollectionSlim<string>();
+        var queue = new MpmcLockBlockingQueue<string>();
         const string expectedValue = "Hello, Slim!";
 
         // Act
@@ -121,7 +117,7 @@ public class BlockingCollectionSlimTest
     public void TryTake_WithTimeout_ReturnsFalse_WhenTimeoutExpires()
     {
         // Arrange
-        var queue = new BlockingCollectionSlim<int>();
+        var queue = new MpmcLockBlockingQueue<int>();
         var timeoutMs = 300; // 300ms 대기
 
         // Act
@@ -141,7 +137,7 @@ public class BlockingCollectionSlimTest
     public async Task TryTake_WithTimeout_ReturnsTrue_IfItemArrivesInTime()
     {
         // Arrange
-        var queue = new BlockingCollectionSlim<int>();
+        var queue = new MpmcLockBlockingQueue<int>();
         var expectedValue = 999;
 
         // Act

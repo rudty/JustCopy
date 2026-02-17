@@ -3,6 +3,7 @@
 using JustCopy;
 using System.Diagnostics;
 
+[Collection("ALL")]
 public class AutoResetEventSlimTest
 {
     [Fact(DisplayName = "1. [기본] Set() 호출 시 WaitOne()이 한 번만 통과하고 닫히는지 확인 (Auto-Reset 특성)")]
@@ -53,7 +54,7 @@ public class AutoResetEventSlimTest
         });
 
         // 스레드가 확실히 잠들도록 시간을 줌
-        Thread.Sleep(200);
+        await Task.Delay(200);
         Assert.False(waitTask.IsCompleted, "Set()을 호출하기 전에는 깨어나면 안 됩니다.");
 
         // 메인 스레드에서 깨움 (Pulse 발생)

@@ -4,6 +4,7 @@ using Xunit;
 using JustCopy;
 using System.Runtime.InteropServices;
 
+[Collection("ALL")]
 public class NativeArrayPoolTests
 {
     [Fact]

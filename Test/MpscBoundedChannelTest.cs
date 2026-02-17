@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Xunit;
 using JustCopy;
 
+[Collection("ALL")]
 public class MpscBoundedChannelTests
 {
     [Fact(DisplayName = "1. 기본 입출력: 데이터가 순서대로 잘 들어가고 나오는지 검증")]
@@ -40,8 +41,8 @@ public class MpscBoundedChannelTests
         Assert.False(readTask.IsCompleted);
 
         // Act
-        // 2. 다른 스레드(생산자)가 데이터를 집어넣어 소비자를 깨웁니다.
-        Task.Run(() => channel.TryWrite("Hello, Architect!")).Wait();
+        // 🚨 수정됨: Task.Run().Wait()을 지우고 깔끔하게 await Task.Run으로 비동기 호출!
+        await Task.Run(() => channel.TryWrite("Hello, Architect!"));
 
         // Assert
         // 3. 소비자가 깨어나서 true를 반환해야 합니다.
@@ -77,7 +78,7 @@ public class MpscBoundedChannelTests
         channel.TryRead(out _); // 1개 여유 공간 확보
 
         // 여유 공간이 생겼으므로 생산자의 Task가 정상적으로 완료되어야 함
-        await overWriteTask.WaitAsync(TimeSpan.FromSeconds(2)); // .NET 6+ API (구버전이면 WhenAny 사용)
+        await overWriteTask.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(overWriteTask.IsCompletedSuccessfully);
 
         // 마지막 33번째 데이터가 제대로 들어갔는지 확인 (꼬리에 999가 있어야 함)
@@ -106,7 +107,19 @@ public class MpscBoundedChannelTests
         var totalMessagesReceived = 0L;
         var expectedTotalMessages = producerCount * messagesPerProducer;
 
-        // 소비자 Task (단일 소비자)
+        // 🚀 수정됨: 생산자 Tasks를 먼저 스레드 풀에 띄움 (소비자 기아 상태 방지)
+        var producerTasks = Enumerable.Range(0, producerCount).Select(_ => Task.Run(() =>
+        {
+            for (long i = 1; i <= messagesPerProducer; i++)
+            {
+                channel.TryWrite(i);
+            }
+        })).ToArray();
+
+        // 🚀 수정됨: 생산자들이 스레드 풀에 안착할 시간을 살짝 줌
+        await Task.Delay(100);
+
+        // 소비자 Task (단일 소비자) - 생산자 뒤에 띄움!
         var consumerTask = Task.Run(async () =>
         {
             while (totalMessagesReceived < expectedTotalMessages)
@@ -122,18 +135,17 @@ public class MpscBoundedChannelTests
             }
         });
 
-        // Act: 다중 생산자 Task 폭격 시작 (동시에 큐에 밀어넣기)
-        var producerTasks = Enumerable.Range(0, producerCount).Select(_ => Task.Run(() =>
-        {
-            for (long i = 1; i <= messagesPerProducer; i++)
-            {
-                channel.TryWrite(i);
-            }
-        })).ToArray();
-
         // Assert: 모든 생산자와 소비자가 무사히 끝날 때까지 대기
-        await Task.WhenAll(producerTasks);
-        await consumerTask.WaitAsync(TimeSpan.FromSeconds(60));
+        try
+        {
+            // 🚀 수정됨: 생산자와 소비자를 Task.WhenAll로 묶어서 동시에 비동기 대기!
+            var allTasks = producerTasks.Append(consumerTask);
+            await Task.WhenAll(allTasks).WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        catch
+        {
+            Assert.Fail($"데드락 발생 또는 처리 지연! 처리된 항목 수: {totalMessagesReceived}/{expectedTotalMessages}");
+        }
 
         // 단 1건의 유실도, 덮어쓰기(오염)도 없어야 합이 정확히 일치함!
         Assert.Equal(expectedTotalMessages, totalMessagesReceived);

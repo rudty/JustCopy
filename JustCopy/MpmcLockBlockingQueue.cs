@@ -11,61 +11,95 @@ namespace JustCopy
 {
     using System;
     using System.Diagnostics;
-    using System.Threading;
-    using System.Runtime.InteropServices;
     using System.Runtime.CompilerServices;
+    using System.Runtime.InteropServices;
+    using System.Threading;
 
     /// <summary>
-    /// Multiple-producer single-consumer (MPSC) blocking queue.
-    /// Note: T must be non-null reference when T is reference type — Add(null) throws.
-    /// Only a single consumer may call Take/TryTake concurrently.
-    /// -
-    /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
-    /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
+    /// Spsc 자료구조에 잠금을 사용하는 고성능 컬렉션입니다 <see cref="System.Collections.Concurrent.BlockingCollection{T}"/> 의 대안입니다.
     /// </summary>
-    public sealed class MpscBlockingQueue<T>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><description><see cref="System.Collections.Concurrent.BlockingCollection{T}"/>의 글로벌 잠금(Lock) 병목으로 인해 성능 저하가 발생할 때 대체하여 사용합니다.</description></item>
+    /// <item><description><b>작업 스레드가 1 ~ 2개 (저경합):</b> BlockingCollectionSlim 이 컨텍스트 스위칭 오버헤드가 적어 가장 높은 효율을 보여줍니다.</description></item>
+    /// <item><description><b>작업 스레드가 3 ~ 4개 (중간 경합):</b> System.Threading.Channels.Channel 비슷한 속도를 내기 시작하며, 메모리 할당량(GC) 측면에서는 MpmcLockBlockingQueue 가 압도적으로 우수합니다.</description></item>
+    /// <item><description><b>작업 스레드가 4개 이상 (고경합):</b> MpmcLockBlockingQueue 가 최고의 처리량을 제공합니다.</description></item>
+    /// <item><description>적용 후 실제 비즈니스 로직과 트래픽 환경에서 더 나은 성능으로 작동하는지 벤치마크 테스트를 수행하는 것을 권장합니다.</description></item>
+    /// </list>
+    /// </remarks>
+    public sealed class MpmcLockBlockingQueue<T>
     {
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
         private static readonly bool IsReferenceOrContainsReferences = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
-
-        private readonly object syncRoot = new object();
+        private readonly object readLock = new object();
+        private readonly object writeLock = new object();
         private readonly SingleProducerSingleConsumerQueue queue;
+        private int waitingReaders;
 
-        private bool isWaiting;
-        private T fastItem;
-
-        public MpscBlockingQueue(int initializeSegmentSize = 4096)
+        public MpmcLockBlockingQueue(int initializeSegmentSize = 4096)
         {
             queue = new SingleProducerSingleConsumerQueue(initializeSegmentSize);
         }
 
         public void Add(T item)
         {
-            lock (syncRoot)
+            lock (writeLock)
             {
-                if (isWaiting)
+                queue.Enqueue(item);
+
+                if (waitingReaders > 0)
                 {
-                    fastItem = item;
-                    isWaiting = false; // "너 이제 대기 상태 아님!" 이라고 알려줌
-                    Monitor.Pulse(syncRoot);
-                }
-                else
-                {
-                    queue.Enqueue(item);
+                    Monitor.Pulse(writeLock);
                 }
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryTake(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
-            out T outItem)
+            out T item)
         {
-            return queue.TryDequeue(out outItem);
+            lock (readLock)
+            {
+                return queue.TryDequeue(out item);
+            }
+        }
+
+        public T Take()
+        {
+            if (TryTake(out var item))
+            {
+                return item;
+            }
+
+            lock (writeLock)
+            {
+                while (true)
+                {
+                    lock (readLock)
+                    {
+                        if (queue.TryDequeue(out item))
+                        {
+                            return item;
+                        }
+                    }
+
+                    waitingReaders += 1;
+                    try
+                    {
+                        Monitor.Wait(writeLock);
+                    }
+                    finally
+                    {
+                        waitingReaders -= 1;
+                    }
+                }
+            }
         }
 
         public bool TryTake(
@@ -92,7 +126,7 @@ namespace JustCopy
 
             var startTimeStamp = 0L;
             var useTimeout = false;
-            var remainTimeout = millisecondsTimeout; // this will be adjusted if necessary.
+            var remainTimeout = millisecondsTimeout;
 
             if (millisecondsTimeout != Timeout.Infinite)
             {
@@ -100,79 +134,40 @@ namespace JustCopy
                 useTimeout = true;
             }
 
-            // 2. Sleep 준비
-            lock (syncRoot)
+            // 2. Slow Path (Timeout 적용)
+            lock (writeLock)
             {
-                // 3-1. Monitor.Wait 전에 항목을 다시 확인
-                if (TryTake(out item))
-                {
-                    return true; // 락 잡는 찰나에 들어왔는지 재확인
-                }
-
                 while (true)
                 {
-                    // 3-2. 타임아웃 시간 갱신
                     if (useTimeout)
                     {
-                        remainTimeout = MpscBlockingQueue_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                        remainTimeout = MpmcLockBlockingQueue_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
                         if (remainTimeout <= 0)
                         {
+                            item = default;
                             return false; // 타임아웃 만료
                         }
                     }
 
-                    isWaiting = true;
-                    if (!Monitor.Wait(syncRoot, remainTimeout))
+                    if (TryTake(out item))
                     {
-                        isWaiting = false; 
-                        return false; // 타임아웃 발생 (Monitor.Wait이 false 반환)
+                        return true;
                     }
-
-                    // 신호 받고 깨어남 (Add에서 isWaiting을 false로 설정했음)
-                    if (!isWaiting)
+                    
+                    waitingReaders += 1;
+                    try
                     {
-                        item = fastItem;
-                        if (IsReferenceOrContainsReferences)
+                        if (!Monitor.Wait(writeLock, remainTimeout))
                         {
-                            fastItem = default;
+                            item = default;
+                            return false; // Monitor.Wait 중 타임아웃 발생
                         }
-
-                        return true; 
+                    }
+                    finally
+                    {
+                        waitingReaders -= 1;
                     }
                 }
-            }
-        }
-
-        public T Take()
-        {
-            // 1. Fast Path
-            if (TryTake(out var item))
-            {
-                return item;
-            }
-
-            // 2. Sleep 준비
-            lock (syncRoot)
-            {
-                if (TryTake(out item))
-                {
-                    return item; // 락 잡는 찰나에 들어왔는지 재확인
-                }
-
-                isWaiting = true;
-
-                while (isWaiting)
-                {
-                    Monitor.Wait(syncRoot);
-                }
-
-                item = fastItem;
-                if (IsReferenceOrContainsReferences)
-                {
-                    fastItem = default;
-                }
-
-                return item;
             }
         }
 
@@ -220,6 +215,7 @@ namespace JustCopy
 
             /// <summary>The head of the linked list of segments.</summary>
             private volatile Segment _head;
+
             /// <summary>The tail of the linked list of segments.</summary>
             private volatile Segment _tail;
 
@@ -228,9 +224,11 @@ namespace JustCopy
             {
                 // Validate constants in ctor rather than in an explicit cctor that would cause perf degradation
                 Debug.Assert(initializeSegmentSize > 0, "Initial segment size must be > 0.");
-                Debug.Assert((initializeSegmentSize & (initializeSegmentSize - 1)) == 0, "Initial segment size must be a power of 2");
+                Debug.Assert((initializeSegmentSize & (initializeSegmentSize - 1)) == 0,
+                    "Initial segment size must be a power of 2");
                 Debug.Assert(initializeSegmentSize <= MaxSegmentSize, "Initial segment size should be <= maximum.");
-                Debug.Assert(MaxSegmentSize < int.MaxValue / 2, "Max segment size * 2 must be < int.MaxValue, or else overflow could occur.");
+                Debug.Assert(MaxSegmentSize < int.MaxValue / 2,
+                    "Max segment size * 2 must be < int.MaxValue, or else overflow could occur.");
 
                 // Initialize the queue
                 _head = _tail = new Segment(initializeSegmentSize);
@@ -280,12 +278,14 @@ namespace JustCopy
                 newSegment._state._lastCopy = 1;
 
                 try
-                { }
+                {
+                }
                 finally
                 {
                     // Finally block to protect against corruption due to a thread abort between
                     // setting _next and setting _tail (this is only relevant on .NET Framework).
-                    Volatile.Write(ref _tail._next, newSegment); // ensure segment not published until item is fully stored
+                    Volatile.Write(ref _tail._next,
+                        newSegment); // ensure segment not published until item is fully stored
                     _tail = newSegment;
                 }
             }
@@ -295,7 +295,7 @@ namespace JustCopy
             /// <returns>true if an item could be dequeued; otherwise, false.</returns>
             public bool TryDequeue(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
                 out T result)
 
@@ -326,7 +326,7 @@ namespace JustCopy
             /// <returns>true if an item could be peeked; otherwise, false.</returns>
             public bool TryPeek(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
                 out T result)
             {
@@ -351,9 +351,10 @@ namespace JustCopy
             /// <param name="peek">true if this is only a peek operation; false if the item should be dequeued.</param>
             /// <param name="result">The dequeued item.</param>
             /// <returns>true if an item could be dequeued; otherwise, false.</returns>
-            private bool TryDequeueSlow(Segment segment, T[] array, bool peek,
+            private bool TryDequeueSlow(
+                Segment segment, T[] array, bool peek,
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
+            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
 #endif
                 out T result)
             {
@@ -363,9 +364,9 @@ namespace JustCopy
                 if (segment._state._last != segment._state._lastCopy)
                 {
                     segment._state._lastCopy = segment._state._last;
-                    return peek ?
-                        TryPeek(out result) :
-                        TryDequeue(out result); // will only recur once for this operation
+                    return peek
+                        ? TryPeek(out result)
+                        : TryDequeue(out result); // will only recur once for this operation
                 }
 
                 if (segment._next != null && segment._state._first == segment._state._last)
@@ -388,7 +389,8 @@ namespace JustCopy
                 {
                     array[first] = default; // Clear the slot to release the element
                     segment._state._first = (first + 1) & (segment._array.Length - 1);
-                    segment._state._lastCopy = segment._state._last; // Refresh _lastCopy to ensure that _first has not passed _lastCopy
+                    segment._state._lastCopy =
+                        segment._state._last; // Refresh _lastCopy to ensure that _first has not passed _lastCopy
                 }
 
                 return true;
@@ -400,10 +402,13 @@ namespace JustCopy
             {
                 /// <summary>The next segment in the linked list of segments.</summary>
                 internal Segment _next;
+
                 /// <summary>The data stored in this segment.</summary>
                 internal readonly T[] _array;
+
                 /// <summary>Details about the segment.</summary>
-                internal MpscBlockingQueue_SegmentState _state; // separated out to enable StructLayout attribute to take effect
+                internal MpmcBlockingQueue_SegmentState
+                    _state; // separated out to enable StructLayout attribute to take effect
 
                 /// <summary>Initializes the segment.</summary>
                 /// <param name="size">The size to use for this segment.</param>
@@ -416,7 +421,7 @@ namespace JustCopy
         }
     }
 
-    static class MpscBlockingQueue_Companion
+    static class MpmcLockBlockingQueue_Companion
     {
         private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
 
@@ -451,16 +456,13 @@ namespace JustCopy
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 124)]
-    internal struct MpscBlockingQueue_PaddingFor32
-    {
-    }
+    internal struct MpmcLockBlockingQueue_PaddingFor32 { }
 
-    /// <summary>Stores information about a segment.</summary>
-    [StructLayout(LayoutKind.Sequential)] // enforce layout so that padding reduces false sharing
-    public struct MpscBlockingQueue_SegmentState
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MpmcBlockingQueue_SegmentState
     {
         /// <summary>Padding to reduce false sharing between the segment's array and _first.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad0;
+        internal MpmcLockBlockingQueue_PaddingFor32 _pad0;
 
         /// <summary>The index of the current head in the segment.</summary>
         internal volatile int _first;
@@ -468,7 +470,7 @@ namespace JustCopy
         internal int _lastCopy; // not volatile as read and written by the producer, except for IsEmpty, and there _lastCopy is only read after reading the volatile _first
 
         /// <summary>Padding to reduce false sharing between the first and last.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad1;
+        internal MpmcLockBlockingQueue_PaddingFor32 _pad1;
 
         /// <summary>A copy of the current head index.</summary>
         internal int _firstCopy; // not volatile as only read and written by the consumer thread
@@ -476,6 +478,6 @@ namespace JustCopy
         internal volatile int _last;
 
         /// <summary>Padding to reduce false sharing with the last and what's after the segment.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad2;
+        internal MpmcLockBlockingQueue_PaddingFor32 _pad2;
     }
 }
