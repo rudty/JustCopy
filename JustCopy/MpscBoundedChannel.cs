@@ -113,6 +113,7 @@ namespace JustCopy
             while (unchecked(currentTail - headValue) >= slots.Length)
             {
                 spin.SpinOnce();
+                headValue = Volatile.Read(ref head.ValueVolatile);
             }
 
             var index = currentTail & mask;
