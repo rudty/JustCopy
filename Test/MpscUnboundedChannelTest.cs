@@ -73,7 +73,7 @@ public class MpscUnboundedChannelTests
         // Act
         // 3. 다른 스레드(생산자)가 데이터를 넣어 소비자를 깨웁니다. 
         // 이때 생산자는 새로운 세그먼트를 동적으로 생성하고 데이터를 넣습니다.
-        Task.Run(() => channel.TryWrite("C_From_New_Segment")).Wait();
+        await Task.Run(() => channel.TryWrite("C_From_New_Segment"));
 
         // Assert
         // 4. 세그먼트가 분리되어 있어도 소비자가 무사히 깨어나야 합니다.
