@@ -162,12 +162,21 @@ namespace JustCopy
                 throw new ArgumentNullException(nameof(array));
             }
 
+            // Clear the array if the user requested it.
+            if (clearArray)
+            {
+                unsafe
+                {
+                    new Span<byte>(array.Pointer.ToPointer(), array.Capacity).Clear();
+                }
+            }
+
             // Determine with what bucket this array length is associated
             var bucketIndex = Utilities.SelectBucketIndex(array.Capacity);
             var tlsBuckets = t_tlsBuckets;
             if (tlsBuckets is null && !Thread.CurrentThread.IsThreadPoolThread)
             {
-                PushToPartition(bucketIndex, array.Pointer);
+                PushToPartition(bucketIndex, array.Pointer, array.Capacity);
                 return;
             }
 
@@ -186,15 +195,6 @@ namespace JustCopy
                 return;
             }
 
-            // Clear the array if the user requested it.
-            if (clearArray)
-            {
-                unsafe
-                {
-                    new Span<byte>(array.Pointer.ToPointer(), array.Capacity).Clear();
-                }
-            }
-
             // Check to see if the buffer is the correct size for this bucket.
             if (array.Capacity != Utilities.GetMaxSizeForBucket(bucketIndex))
             {
@@ -210,17 +210,24 @@ namespace JustCopy
             tla = array.Pointer;
             if (prev != IntPtr.Zero)
             {
-                PushToPartition(bucketIndex, prev);
+                PushToPartition(bucketIndex, prev, 0);
             }
         }
 
-        private static void PushToPartition(int bucketIndex, IntPtr pointer)
+        private static void PushToPartition(int bucketIndex, IntPtr pointer, int capacity)
         {
             var perCoreBuckets = _buckets;
             if ((uint)bucketIndex >= (uint)perCoreBuckets.Length)
             {
                 Utilities.Free(pointer);
                 return;
+            }
+
+            // Check to see if the buffer is the correct size for this bucket.
+            if (capacity > 0 && capacity != Utilities.GetMaxSizeForBucket(bucketIndex))
+            {
+                throw new ArgumentException(
+                    "The buffer is not associated with this pool and may not be returned to it.", nameof(capacity));
             }
 
             var partitions = perCoreBuckets[bucketIndex] ?? CreatePerCorePartitions(bucketIndex);
