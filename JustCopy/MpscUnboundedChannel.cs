@@ -63,7 +63,7 @@ namespace JustCopy
 #pragma warning restore CS0169
 #pragma warning restore IDE0051
 
-        public MpscUnboundedChannel(int segmentSize)
+        public MpscUnboundedChannel(int segmentSize = 4096)
         {
             var initialSegment = new Segment(segmentSize);
             headVolatile = initialSegment;
