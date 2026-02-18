@@ -15,13 +15,6 @@ namespace JustCopy
     using System.Threading.Tasks;
     using System.Threading.Tasks.Sources;
 
-    // CPU 캐시 오염을 막기 위한 128바이트 패딩 인덱스
-    [StructLayout(LayoutKind.Explicit, Size = 128)]
-    internal struct MpscBoundedChannel_PaddedInt
-    {
-        [FieldOffset(64)] public int ValueVolatile;
-    }
-
     /// <summary>
     /// Ring Buffer를 사용한 고성능 Queue 구현입니다.
     /// 프로그램 시작 시 객체를 생성하고 삭제하지 않는 구조에서는 System.Threading.Channels.Channel 보다 좋은 성능으로 동작합니다.
@@ -121,7 +114,10 @@ namespace JustCopy
             // 3. 데이터 쓰기 및 시퀀스 넘버 발행 (ABA 문제 완벽 차단)
             ref var currentSlot = ref slots[index];
             currentSlot.Item = item;
-            Interlocked.Exchange(ref currentSlot.SequenceNumberVolatile, nextTail);
+            Volatile.Write(ref currentSlot.SequenceNumberVolatile, nextTail);
+
+            // MemoryBarrier 가 없으면 컴파일러/CPU 최적화로 위아래 구문이 바뀔 수 있음
+            Interlocked.MemoryBarrier();
 
             // 4. 잠든 소비자 깨우기
             if (Volatile.Read(ref isWaitingVolatile) == 1)
@@ -210,5 +206,12 @@ namespace JustCopy
         {
             mrvtsc.OnCompleted(continuation, state, token, flags);
         }
+    }
+
+    // CPU 캐시 오염을 막기 위한 128바이트 패딩 인덱스
+    [StructLayout(LayoutKind.Explicit, Size = 128)]
+    internal struct MpscBoundedChannel_PaddedInt
+    {
+        [FieldOffset(64)] public int ValueVolatile;
     }
 }
