@@ -14,11 +14,49 @@ namespace JustCopy
     using System.Threading.Tasks;
     using System.Threading.Tasks.Sources;
 
-    [StructLayout(LayoutKind.Explicit, Size = 64)]
-    internal struct MpscUnboundedChannel_CacheLinePadding
-    {
-    }
-
+    /// <summary>
+    /// System.Threading.Channels.Channel&lt;T&gt;의 Unbounded 모드를 대체하기 위해 설계된 
+    /// 고성능 MPSC(Multiple-Producer Single-Consumer) 비동기 큐입니다.
+    /// <para>
+    /// 일반적인 상황에서는 표준 라이브러리의 최적화된 풀링 정책으로 인해 성능이 오히려 떨어질 수 있으나,
+    /// 생산자(Producer) 스레드가 잠금(Lock)으로 인해 블로킹되는 현상을 원천적으로 방지해야 하는 
+    /// 초고성능 파이프라인(Network I/O, Logging 등)에 최적화되어 있습니다.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// <para><b>[아키텍처 특징]</b></para>
+    /// <list type="bullet">
+    /// <item>
+    ///     <description><b>세그먼트 링크드 리스트 (Segmented Linked List):</b> 
+    ///     내부적으로 배열 세그먼트를 연결 리스트로 관리합니다. 
+    ///     큐가 확장될 때 전체 배열을 복사(Resize)하는 비용이 발생하지 않으며, 메모리 파편화를 줄입니다.
+    ///     </description>
+    /// </item>
+    /// <item>
+    ///     <description><b>Lock-Free 쓰기 (Wait-Free Enqueue):</b> 
+    ///     다수의 생산자가 <see cref="Interlocked.Increment(ref int)"/> 연산만으로 경합 없이 데이터를 삽입합니다. 
+    ///     표준 채널과 달리 쓰기 작업에서 스레드 대기(Spin/Monitor)가 발생하지 않습니다.
+    ///     </description>
+    /// </item>
+    /// <item>
+    ///     <description><b>배치 할당 (Batch Allocation):</b> 
+    ///     데이터 하나마다 노드를 생성하지 않고 세그먼트 단위로 메모리를 할당하여, 
+    ///     대량의 메시지 처리 시 GC(가비지 컬렉션) 오버헤드를 최소화했습니다.
+    ///     </description>
+    /// </item>
+    /// <item>
+    ///     <description><b>효율적인 비동기 대기:</b> 
+    ///     <see cref="WaitToReadAsync"/>를 통해 소비자가 데이터 유입을 CPU 소모 없이 효율적으로 기다릴 수 있습니다.
+    ///     </description>
+    /// </item>
+    /// </list>
+    /// <para><b>[스레드 안전성 주의]</b></para>
+    /// <para>
+    /// 이 클래스는 <b>단일 소비자(Single Consumer)</b> 패턴을 전제로 설계되었습니다. 
+    /// <see cref="TryWrite(T)"/>는 여러 스레드에서 동시에 호출해도 안전하지만, 
+    /// <see cref="TryRead(out T)"/> 및 <see cref="WaitToReadAsync"/>는 반드시 한 번에 하나의 스레드에서만 호출해야 합니다.
+    /// </para>
+    /// </remarks>
     [StructLayout(LayoutKind.Sequential)]
     public sealed class MpscUnboundedChannel<T> : IValueTaskSource<bool>
     {
@@ -59,16 +97,17 @@ namespace JustCopy
 
         private ManualResetValueTaskSourceCore<bool> mrvtsc;
         private readonly MpscUnboundedChannel_CacheLinePadding padding2;
-        private readonly int segmentSize;
+        private readonly int maxSegmentSize;
 #pragma warning restore CS0169
 #pragma warning restore IDE0051
 
-        public MpscUnboundedChannel(int segmentSize = 4096)
+        public MpscUnboundedChannel(int maxSegmentSize = 4096)
         {
-            var initialSegment = new Segment(segmentSize);
+            const int initialSize = 32;
+            var initialSegment = new Segment(initialSize);
             headVolatile = initialSegment;
             tail = initialSegment;
-            this.segmentSize = segmentSize;
+            this.maxSegmentSize = maxSegmentSize;
             mrvtsc = new ManualResetValueTaskSourceCore<bool>
             {
                 RunContinuationsAsynchronously = true
@@ -81,8 +120,8 @@ namespace JustCopy
             while (true)
             {
                 var index = Interlocked.Increment(ref segment.EnqueueIndex) - 1;
-
-                if (index < segmentSize)
+                var currentSegmentSize = segment.Slots.Length;
+                if (index < currentSegmentSize)
                 {
                     ref var segmentSlot = ref segment.Slots[index];
                     segmentSlot.Item = item;
@@ -97,8 +136,26 @@ namespace JustCopy
                 var nextSegment = Volatile.Read(ref segment.NextVolatile);
                 if (nextSegment is null)
                 {
-                    // 여러 개의 스레드 환경에서는 경합이 낮아 대부분 성공합니다.
-                    var newSeg = new Segment(segmentSize);
+#if MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
+                    lock (this)
+                    {
+                        // 3. 락 안에서 다시 한번 확인 (진짜 없는지?)
+                        nextSegment = Volatile.Read(ref segment.NextVolatile);
+
+                        if (nextSegment is null)
+                        {
+                            // 4. 진짜 없을 때만 할당
+                            var nextSize = Math.Min(segment.Slots.Length * 2, maxSegmentSize);
+                            var newSeg = new Segment(nextSize);
+
+                            // 5. 연결 (락 안이므로 Interlocked 불필요, 하지만 가시성을 위해 Volatile.Write)
+                            Volatile.Write(ref segment.NextVolatile, newSeg);
+                            nextSegment = newSeg;
+                        }
+                    }
+#else
+                    var nextSegmentSize = Math.Min(currentSegmentSize * 2, maxSegmentSize);
+                    var newSeg = new Segment(nextSegmentSize);
                     if (Interlocked.CompareExchange(ref segment.NextVolatile, newSeg, null) is null)
                     {
                         nextSegment = newSeg;
@@ -107,6 +164,7 @@ namespace JustCopy
                     {
                         nextSegment = Volatile.Read(ref segment.NextVolatile);
                     }
+#endif
                 }
                 // --- segment.Next 끝
 
@@ -142,7 +200,7 @@ namespace JustCopy
             var segment = tail;
             var index = consumerIndex;
 
-            if (index == segmentSize)
+            if (index == segment.Slots.Length)
             {
                 var next = Volatile.Read(ref segment.NextVolatile);
                 if (next is null)
@@ -185,7 +243,7 @@ namespace JustCopy
             var segment = tail;
             var index = consumerIndex;
             {
-                if (index < segmentSize)
+                if (index < segment.Slots.Length)
                 {
                     if (Volatile.Read(ref segment.Slots[index].WrittenStateVolatile) == 1)
                     {
@@ -216,7 +274,7 @@ namespace JustCopy
 
             // 2. isSleepingVolatile 세트 후 생산자가 그 찰나에 데이터를 넣었는지 다시 확인
             {
-                if (index != segmentSize)
+                if (index != segment.Slots.Length)
                 {
                     if (Volatile.Read(ref segment.Slots[index].WrittenStateVolatile) == 1)
                     {
@@ -259,6 +317,11 @@ namespace JustCopy
         {
             mrvtsc.OnCompleted(continuation, state, token, flags);
         }
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    internal struct MpscUnboundedChannel_CacheLinePadding
+    {
     }
 }
 

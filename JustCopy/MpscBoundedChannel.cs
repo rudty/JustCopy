@@ -57,36 +57,36 @@ namespace JustCopy
         /// </summary>
         private ManualResetValueTaskSourceCore<bool> mrvtsc;
 
-        public MpscBoundedChannel(int minCapacity = 131072)
+        public MpscBoundedChannel(int capacity = 131072)
         {
             const int maxCapacity = 1 << 30; // int 범위 내에서 최대 2의 배수
 
-            if (minCapacity < 32)
+            if (capacity < 32)
             {
-                minCapacity = 32; // 최소 크기 보장
+                capacity = 32; // 최소 크기 보장
             }
-            else if (minCapacity > maxCapacity)
+            else if (capacity > maxCapacity)
             {
-                minCapacity = maxCapacity;
+                capacity = maxCapacity;
             }
             else
             {
 #if NETCOREAPP3_0_OR_GREATER
-                minCapacity = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)minCapacity);
+                capacity = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)capacity);
 #else
                 // 2의 제곱수로 올림 (capacity가 이미 2의 제곱수라면 그대로 유지)
-                minCapacity -= 1;
-                minCapacity |= minCapacity >> 1;
-                minCapacity |= minCapacity >> 2;
-                minCapacity |= minCapacity >> 4;
-                minCapacity |= minCapacity >> 8;
-                minCapacity |= minCapacity >> 16;
-                minCapacity += 1;
+                capacity -= 1;
+                capacity |= capacity >> 1;
+                capacity |= capacity >> 2;
+                capacity |= capacity >> 4;
+                capacity |= capacity >> 8;
+                capacity |= capacity >> 16;
+                capacity += 1;
 #endif
             }
 
-            slots = new Slot[minCapacity];
-            mask = minCapacity - 1;
+            slots = new Slot[capacity];
+            mask = capacity - 1;
 
             mrvtsc = new ManualResetValueTaskSourceCore<bool>
             {
@@ -94,7 +94,11 @@ namespace JustCopy
             };
         }
 
-        public bool TryWrite(T item)
+        /// <summary>
+        /// 값을 넣으려고 시도합니다. 만약 큐가 가득 찼다면 <see cref="SpinWait"/> 으로 대기합니다.
+        /// </summary>
+        /// <param name="item">넣을 값</param>
+        public void Write(T item)
         {
             // 1. 꼬리표(티켓) 뽑기
             var nextTail = Interlocked.Increment(ref tail.ValueVolatile);
@@ -117,6 +121,7 @@ namespace JustCopy
             Volatile.Write(ref currentSlot.SequenceNumberVolatile, nextTail);
 
             // MemoryBarrier 가 없으면 컴파일러/CPU 최적화로 위아래 구문이 바뀔 수 있음
+            // SequenceNumberVolatile 전에 isWaitingVolatile 을 한다던가..
             Interlocked.MemoryBarrier();
 
             // 4. 잠든 소비자 깨우기
@@ -127,8 +132,6 @@ namespace JustCopy
                     mrvtsc.SetResult(true);
                 }
             }
-
-            return true;
         }
 
         public bool TryRead(
