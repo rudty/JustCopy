@@ -1,4 +1,4 @@
-﻿namespace Test;
+namespace Test;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -15,8 +15,8 @@ public class MpscBoundedChannelTests
         var channel = new MpscBoundedChannel<int>(32);
 
         // Act & Assert
-        Assert.True(channel.TryWrite(10));
-        Assert.True(channel.TryWrite(20));
+        channel.Write(10);
+        channel.Write(20);
 
         Assert.True(channel.TryRead(out var item1));
         Assert.Equal(10, item1);
@@ -42,7 +42,7 @@ public class MpscBoundedChannelTests
 
         // Act
         // 🚨 수정됨: Task.Run().Wait()을 지우고 깔끔하게 await Task.Run으로 비동기 호출!
-        await Task.Run(() => channel.TryWrite("Hello, Architect!"));
+        await Task.Run(() => channel.Write("Hello, Architect!"));
 
         // Assert
         // 3. 소비자가 깨어나서 true를 반환해야 합니다.
@@ -63,12 +63,12 @@ public class MpscBoundedChannelTests
         // 큐를 한 바퀴 꽉 채웁니다. (크기가 32이므로 32개 쓰기)
         for (var i = 0; i < 32; i++)
         {
-            channel.TryWrite(i);
+            channel.Write(i);
         }
 
         // Act
         // 33번째 쓰기 시도 -> 큐가 꽉 찼으므로 SpinWait에 걸려 멈춰야 함!
-        var overWriteTask = Task.Run(() => channel.TryWrite(999));
+        var overWriteTask = Task.Run(() => channel.Write(999));
 
         // 약간의 시간을 주어도 overWriteTask가 완료되지 않아야 함 (스핀 중)
         await Task.Delay(100);
@@ -112,7 +112,7 @@ public class MpscBoundedChannelTests
         {
             for (long i = 1; i <= messagesPerProducer; i++)
             {
-                channel.TryWrite(i);
+                channel.Write(i);
             }
         })).ToArray();
 
@@ -151,4 +151,50 @@ public class MpscBoundedChannelTests
         Assert.Equal(expectedTotalMessages, totalMessagesReceived);
         Assert.Equal(expectedTotalSum, actualTotalSum);
     }
+
+    // 오래걸리니까 필요 시 주석 풀고 할것 
+    //[Fact(DisplayName = "5. 오버 플로우 테스트")]
+
+    //public async Task IntegerOverflow_Honest_StressTest()
+    //{
+    //    // 1. Arrange
+    //    // 일부러 작은 버퍼(1024)를 써서, 생산자와 소비자가 수백만 번 뱅글뱅글 돌게 만듭니다.
+    //    // 이렇게 해야 tail과 head가 21억 번 증가할 때까지 버퍼 내부에서 지지고 볶습니다.
+    //    var channel = new MpscBoundedChannel<int>(13107200);
+
+    //    // 목표: int.MaxValue를 넘어서 한 바퀴 더 돌기 (+ 10,000개 더)
+    //    const long totalCount = (long)int.MaxValue * 2L + 10000L;
+
+    //    // 2. Act & Assert (소비자)
+    //    var consumerTask = Task.Run(() =>
+    //    {
+    //        long consumedCount = 0;
+    //        while (consumedCount < totalCount)
+    //        {
+    //            if (channel.TryRead(out var item))
+    //            {
+    //                // 데이터 정합성 검증
+    //                // (int)consumedCount 캐스팅을 통해 기대값도 오버플로우를 똑같이 시뮬레이션
+    //                var expected = (int)consumedCount;
+
+    //                if (item != expected)
+    //                {
+    //                    throw new Exception($"Data Broken! Index: {consumedCount}, Expected: {expected}, Actual: {item}");
+    //                }
+
+    //                consumedCount++;
+    //            }
+    //        }
+    //    });
+
+    //    // 3. Act (생산자) - 정직하게 21억 번 넣기
+    //    for (long i = 0; i < totalCount; i++)
+    //    {
+    //        // 큐가 꽉 차면 내부에서 알아서 SpinWait하며 대기함
+    //        channel.Write((int)i);
+    //    }
+
+    //    // 4. 소비자가 다 먹을 때까지 대기
+    //    await consumerTask;
+    //}
 }
