@@ -81,34 +81,19 @@
 
             // Spin
             var spinCount = SpinCount;
-#if NETCOREAPP3_1_OR_GREATER
             SpinWait spin = default;
             while (spin.Count < spinCount)
             {
+#if NETCOREAPP3_1_OR_GREATER
                 spin.SpinOnce(sleep1Threshold: -1);
-
-                if (TryAutoReset())
-                {
-                    return true;
-                }
-            }
 #else
-            for (var spin = 0; spin < spinCount; ++spin)
-            {
-
-                if (spin >= 10 && (spin & 1) == 0)
-                {
-                    Thread.Yield();
-                }
-
-                Thread.SpinWait(1);
-
+                spin.SpinOnce();
+#endif
                 if (TryAutoReset())
                 {
                     return true;
                 }
             }
-#endif
 
             lock (lockObject)
             {

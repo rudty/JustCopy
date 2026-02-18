@@ -87,7 +87,7 @@ namespace JustCopy
             {
 #if NETCOREAPP3_1_OR_GREATER
                 spin.SpinOnce(sleep1Threshold: -1);
-＃else
+#else
                 spin.SpinOnce();
 #endif
                 if (TryTake(out item))
