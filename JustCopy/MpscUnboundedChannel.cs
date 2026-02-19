@@ -1,4 +1,10 @@
-﻿#pragma warning disable IDE0007
+﻿// 기본적으로 UnboundedChannel 에서 NextSegment 할 때 잠금을 사용하는 매크로입니다.
+// 만약 잠금이 없는 버전을 사용하려면 이 매크로를 제거하세요.
+// 잠금이 없는 버전은 락 프리이지만, 세그먼트 확장 시 다수의 생산자가 동시에 NextSegment를 시도할 때
+// 일시적으로 성능 저하가 발생할 수 있습니다.
+#define MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
+
+#pragma warning disable IDE0007
 #pragma warning disable IDE2003
 #pragma warning disable IDE0161
 #pragma warning disable IDE0090
@@ -6,6 +12,7 @@
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
 #nullable disable
 #endif
+
 namespace JustCopy
 {
     using System;
@@ -87,6 +94,13 @@ namespace JustCopy
 
 #pragma warning disable IDE0051
 #pragma warning disable CS0169
+#if MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
+#if NET10_0_OR_GREATER
+        private readonly Lock nextSegmentLock = new();
+#else
+        private readonly object nextSegmentLock = new object();
+#endif
+#endif
         private readonly MpscUnboundedChannel_CacheLinePadding padding0;
         private Segment headVolatile;
         private int isSleepingVolatile;
@@ -137,7 +151,7 @@ namespace JustCopy
                 if (nextSegment is null)
                 {
 #if MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
-                    lock (this)
+                    lock (nextSegmentLock)
                     {
                         // 3. 락 안에서 다시 한번 확인 (진짜 없는지?)
                         nextSegment = Volatile.Read(ref segment.NextVolatile);
