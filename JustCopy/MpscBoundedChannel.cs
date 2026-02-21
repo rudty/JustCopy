@@ -40,17 +40,29 @@ namespace JustCopy
         private readonly Slot[] slots;
         private readonly int mask;
 
+#pragma warning disable IDE0051
+#pragma warning disable CS0169
+        private readonly MpscBoundedChannel_CacheLinePadding padding0;
         /// <summary>
         /// 생산자가 쓰는 위치
         /// </summary>
-        private MpscBoundedChannel_PaddedInt tail;
+        private int tailVolatile;
 
+        private readonly MpscBoundedChannel_CacheLinePadding padding1;
         /// <summary>
         /// 소비자가 읽는 위치
         /// </summary>
-        private MpscBoundedChannel_PaddedInt head;
+        private int headVolatile;
 
+        private readonly MpscBoundedChannel_CacheLinePadding padding2;
+        /// <summary>
+        /// 대기용
+        /// </summary>
         private int isWaitingVolatile;
+
+        private readonly MpscBoundedChannel_CacheLinePadding padding3;
+#pragma warning restore CS0169
+#pragma warning restore IDE0051
 
         /// <summary>
         /// .netstandard 2.0 = PackageReference Microsoft.Bcl.AsyncInterfaces
@@ -95,22 +107,30 @@ namespace JustCopy
         }
 
         /// <summary>
-        /// 값을 넣으려고 시도합니다. 만약 큐가 가득 찼다면 <see cref="SpinWait"/> 으로 대기합니다.
+        /// 값을 넣으려고 시도합니다. 만약 큐가 가득 찼다면 실패합니다
         /// </summary>
         /// <param name="item">넣을 값</param>
-        public void Write(T item)
+        /// <returns>true: 성공, false: 큐가 가득 차서 실패</returns>
+        public bool TryWrite(T item)
         {
-            // 1. 꼬리표(티켓) 뽑기
-            var nextTail = Interlocked.Increment(ref tail.ValueVolatile);
-            var currentTail = nextTail - 1;
-
-            // 2. 백프레셔(Backpressure): 큐가 한 바퀴 다 돌아서 꽉 찼다면 소비자가 비워줄 때까지 대기
-            SpinWait spin = default;
-            var headValue = Volatile.Read(ref head.ValueVolatile);
-            while (unchecked(currentTail - headValue) >= slots.Length)
+            int currentTail; 
+            int nextTail;
+            while (true)
             {
-                spin.SpinOnce();
-                headValue = Volatile.Read(ref head.ValueVolatile);
+                // 1. 꼬리표(티켓) 뽑기
+                currentTail = Volatile.Read(ref tailVolatile);
+                var currentHead = Volatile.Read(ref headVolatile);
+                if (unchecked(currentTail - currentHead) >= slots.Length)
+                {
+                    return false;
+                }
+
+                nextTail = currentTail + 1;
+                if (Interlocked.CompareExchange(ref tailVolatile, nextTail, currentTail) == currentTail)
+                {
+                    // 티켓을 무사히 뽑았으므로 루프 탈출
+                    break;
+                }
             }
 
             var index = currentTail & mask;
@@ -121,7 +141,49 @@ namespace JustCopy
             Volatile.Write(ref currentSlot.SequenceNumberVolatile, nextTail);
 
             // MemoryBarrier 가 없으면 컴파일러/CPU 최적화로 위아래 구문이 바뀔 수 있음
-            // SequenceNumberVolatile 전에 isWaitingVolatile 을 한다던가..
+            // SequenceNumberVolatile 전에 isWaiting 을 한다던가..
+            Interlocked.MemoryBarrier();
+
+            // 4. 잠든 소비자 깨우기
+            if (Volatile.Read(ref isWaitingVolatile) == 1)
+            {
+                if (Interlocked.Exchange(ref isWaitingVolatile, 0) == 1)
+                {
+                    mrvtsc.SetResult(true);
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 값을 넣으려고 시도합니다. 만약 큐가 가득 찼다면 <see cref="SpinWait"/> 으로 대기합니다.
+        /// </summary>
+        /// <param name="item">넣을 값</param>
+        public void Write(T item)
+        {
+            // 1. 꼬리표(티켓) 뽑기
+            var nextTail = Interlocked.Increment(ref tailVolatile);
+            var currentTail = nextTail - 1;
+
+            // 2. 백프레셔(Backpressure): 큐가 한 바퀴 다 돌아서 꽉 찼다면 소비자가 비워줄 때까지 대기
+            SpinWait spin = default;
+            var headValue = Volatile.Read(ref headVolatile);
+            while (unchecked(currentTail - headValue) >= slots.Length)
+            {
+                spin.SpinOnce();
+                headValue = Volatile.Read(ref headVolatile);
+            }
+
+            var index = currentTail & mask;
+
+            // 3. 데이터 쓰기 및 시퀀스 넘버 발행 (ABA 문제 완벽 차단)
+            ref var currentSlot = ref slots[index];
+            currentSlot.Item = item;
+            Volatile.Write(ref currentSlot.SequenceNumberVolatile, nextTail);
+
+            // MemoryBarrier 가 없으면 컴파일러/CPU 최적화로 위아래 구문이 바뀔 수 있음
+            // SequenceNumberVolatile 전에 isWaiting 을 한다던가..
             Interlocked.MemoryBarrier();
 
             // 4. 잠든 소비자 깨우기
@@ -140,7 +202,7 @@ namespace JustCopy
 #endif
             out T item)
         {
-            var currentHead = Volatile.Read(ref head.ValueVolatile);
+            var currentHead = Volatile.Read(ref headVolatile);
             var index = currentHead & mask;
             var nextHead = unchecked(currentHead + 1);
             ref var currentSlot = ref slots[index];
@@ -155,7 +217,7 @@ namespace JustCopy
                 }
 
                 // 머리 위치 이동 (단일 소비자이므로 Interlocked 불필요)
-                Volatile.Write(ref head.ValueVolatile, nextHead);
+                Volatile.Write(ref headVolatile, nextHead);
                 return true;
             }
 
@@ -170,7 +232,7 @@ namespace JustCopy
                 return new ValueTask<bool>(Task.FromCanceled<bool>(cancellationToken));
             }
 
-            var currentHead = Volatile.Read(ref head.ValueVolatile);
+            var currentHead = Volatile.Read(ref headVolatile);
             var index = currentHead & mask;
             var nextHead = unchecked(currentHead + 1);
             ref var currentSlot = ref slots[index];
@@ -212,9 +274,8 @@ namespace JustCopy
     }
 
     // CPU 캐시 오염을 막기 위한 128바이트 패딩 인덱스
-    [StructLayout(LayoutKind.Explicit, Size = 128)]
-    internal struct MpscBoundedChannel_PaddedInt
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    internal struct MpscBoundedChannel_CacheLinePadding
     {
-        [FieldOffset(64)] public int ValueVolatile;
     }
 }
