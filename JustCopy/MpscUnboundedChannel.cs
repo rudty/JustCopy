@@ -16,6 +16,7 @@
 namespace JustCopy
 {
     using System;
+    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
@@ -80,9 +81,14 @@ namespace JustCopy
             public Segment NextVolatile;
             public int EnqueueIndex;
 
-            public Segment(int segmentSize)
+            public Segment(Slot[] slots)
             {
-                Slots = new Slot[segmentSize];
+                Slots = slots;
+            }
+
+            public Segment(int segmentSize)
+                : this(new Slot[segmentSize])
+            {
             }
         }
 
@@ -101,17 +107,31 @@ namespace JustCopy
         private readonly object nextSegmentLock = new object();
 #endif
 #endif
+#if NET10_0_OR_GREATER
+        private readonly Lock poolLock = new();
+#else
+        private readonly object poolLock = new object();
+#endif
+
+        private readonly int maxSegmentSize;
         private readonly MpscUnboundedChannel_CacheLinePadding padding0;
         private Segment headVolatile;
         private int isSleepingVolatile;
-        private readonly MpscUnboundedChannel_CacheLinePadding padding1;
 
+        private readonly MpscUnboundedChannel_CacheLinePadding padding1;
         private Segment tail;
         private int consumerIndex;
 
-        private ManualResetValueTaskSourceCore<bool> mrvtsc;
         private readonly MpscUnboundedChannel_CacheLinePadding padding2;
-        private readonly int maxSegmentSize;
+        private ManualResetValueTaskSourceCore<bool> mrvtsc;
+
+        private readonly MpscUnboundedChannel_CacheLinePadding padding3;
+
+        /// <summary>
+        /// 재활용을 위한 세그먼트 풀 (Stack 구조)
+        /// </summary>
+        private Segment recycleSegmentPool;
+
 #pragma warning restore CS0169
 #pragma warning restore IDE0051
 
@@ -160,12 +180,11 @@ namespace JustCopy
                         {
                             // 4. 진짜 없을 때만 할당
                             var nextSegmentSize = Math.Min((segment.Slots.Length << 1), maxSegmentSize);
-                            nextSegment = new Segment(nextSegmentSize);
+                            nextSegment = PopOrNewSegmentPool(nextSegmentSize);
 
                             // 5. 연결 (락 안이므로 Interlocked 불필요, 하지만 가시성을 위해 Volatile.Write)
                             Volatile.Write(ref segment.NextVolatile, nextSegment);
                             Volatile.Write(ref headVolatile, nextSegment);
-                            Interlocked.MemoryBarrier();
                         }
                     }
                 }
@@ -175,9 +194,16 @@ namespace JustCopy
                 if (nextSegment is null)
                 {
                     var nextSegmentSize = Math.Min((segment.Slots.Length << 1), maxSegmentSize);
-                    nextSegment = new Segment(nextSegmentSize);
+                    nextSegment = PopOrNewSegmentPool(nextSegmentSize);
                     if (Interlocked.CompareExchange(ref segment.NextVolatile, nextSegment, null) != null)
                     {
+                        // 넣으려고 했는데 새로운게 있어서 다시 읽어야함. 
+                        // 그전에 다시 pool 에 넣음
+                        if (nextSegment.Slots.Length == maxSegmentSize)
+                        {
+                            PushSegmentPool(nextSegment);
+                        }
+
                         nextSegment = Volatile.Read(ref segment.NextVolatile);
                     }
                 }
@@ -204,6 +230,41 @@ namespace JustCopy
             return true;
         }
 
+        private Segment PopOrNewSegmentPool(int nextSegmentSize)
+        {
+            var createSegment = true;
+            Segment headSegment;
+            lock (poolLock)
+            {
+                headSegment = recycleSegmentPool;
+                if (!(headSegment is null))
+                {
+                    recycleSegmentPool = headSegment.NextVolatile;
+                    createSegment = false;
+                }
+            }
+
+            if (createSegment)
+            {
+                return new Segment(nextSegmentSize);
+            }
+
+            Array.Clear(headSegment.Slots, 0, headSegment.Slots.Length);
+
+            Volatile.Write(ref headSegment.NextVolatile, null);
+            return headSegment;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void PushSegmentPool(Segment segment)
+        {
+            lock (poolLock)
+            {
+                segment.NextVolatile = recycleSegmentPool;
+                Volatile.Write(ref recycleSegmentPool, segment);
+            }
+        }
+
         public bool TryRead(
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
         [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
@@ -220,6 +281,18 @@ namespace JustCopy
                 {
                     outItem = default;
                     return false;
+                }
+
+                // 작은 크기의 세그먼트 풀링은 낭비라서 최대 사이즈 세그먼트만 대상으로 함
+                if (segment.Slots.Length == maxSegmentSize)
+                {
+                    // 여기서는 동기화 문제때문에
+                    // Segment 를 바로 Push 후 Pop 하면서 초기화하면
+                    // 그 값을 여전히 보고 있는 Write 스레드 쪽에서
+                    // 알 수 없는 문제가 발생해서 데드락이나 무한루프가 발생함.
+                    // 그러므로 새로운 Segment 를 생성함
+                    var cloneSegment = new Segment(segment.Slots);
+                    PushSegmentPool(cloneSegment);
                 }
 
                 tail = next;
@@ -241,6 +314,9 @@ namespace JustCopy
             {
                 segmentSlot.Item = default;
             }
+
+            // 읽은 슬롯은 다시 0으로 초기화하여 생산자가 재사용할 수 있도록 함
+            Volatile.Write(ref segmentSlot.WrittenStateVolatile, 0);
 
             consumerIndex += 1;
             return true;
