@@ -148,9 +148,9 @@ namespace JustCopy
                 // segment.NextVolatile = new Segment(segmentSize);
                 // headVolatile = segment.NextVolatile;
                 var nextSegment = Volatile.Read(ref segment.NextVolatile);
+#if MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
                 if (nextSegment is null)
                 {
-#if MPSC_UNBOUND_CHANNEL_NEXT_SEGMENT_LOCK
                     lock (nextSegmentLock)
                     {
                         // 3. 락 안에서 다시 한번 확인 (진짜 없는지?)
@@ -159,28 +159,28 @@ namespace JustCopy
                         if (nextSegment is null)
                         {
                             // 4. 진짜 없을 때만 할당
-                            var nextSize = Math.Min(segment.Slots.Length * 2, maxSegmentSize);
-                            var newSeg = new Segment(nextSize);
+                            var nextSegmentSize = Math.Min((segment.Slots.Length << 1), maxSegmentSize);
+                            nextSegment = new Segment(nextSegmentSize);
 
                             // 5. 연결 (락 안이므로 Interlocked 불필요, 하지만 가시성을 위해 Volatile.Write)
-                            Volatile.Write(ref segment.NextVolatile, newSeg);
-                            nextSegment = newSeg;
+                            Volatile.Write(ref segment.NextVolatile, nextSegment);
+                            Volatile.Write(ref headVolatile, nextSegment);
+                            Interlocked.MemoryBarrier();
                         }
                     }
+                }
+
+                segment = nextSegment;
 #else
-                    var nextSegmentSize = Math.Min(currentSegmentSize * 2, maxSegmentSize);
-                    var newSeg = new Segment(nextSegmentSize);
-                    if (Interlocked.CompareExchange(ref segment.NextVolatile, newSeg, null) is null)
-                    {
-                        nextSegment = newSeg;
-                    }
-                    else
+                if (nextSegment is null)
+                {
+                    var nextSegmentSize = Math.Min((segment.Slots.Length << 1), maxSegmentSize);
+                    nextSegment = new Segment(nextSegmentSize);
+                    if (Interlocked.CompareExchange(ref segment.NextVolatile, nextSegment, null) != null)
                     {
                         nextSegment = Volatile.Read(ref segment.NextVolatile);
                     }
-#endif
                 }
-                // --- segment.Next 끝
 
                 if (Interlocked.CompareExchange(ref headVolatile, nextSegment, segment) == segment)
                 {
@@ -190,9 +190,8 @@ namespace JustCopy
                 {
                     segment = Volatile.Read(ref headVolatile);
                 }
-
-                // continue;
-            }
+#endif
+            } // while (true)
 
             if (Volatile.Read(ref isSleepingVolatile) == 1)
             {
