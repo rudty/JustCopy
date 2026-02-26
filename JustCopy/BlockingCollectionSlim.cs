@@ -1,17 +1,14 @@
 ﻿#pragma warning disable IDE0007
-#pragma warning disable IDE2003
 #pragma warning disable IDE0090
 #pragma warning disable IDE0161
 #pragma warning disable IDE0130
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-#nullable disable
-#endif
 
 namespace JustCopy
 {
     using System;
     using System.Collections.Concurrent;
     using System.Diagnostics;
+    using System.Diagnostics.CodeAnalysis;
     using System.Runtime.CompilerServices;
     using System.Threading;
 
@@ -62,9 +59,7 @@ namespace JustCopy
         /// 큐에서 항목을 즉시 가져오려고 시도합니다.
         /// </summary>
         public bool TryTake(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
-#endif
+            [MaybeNullWhen(false)] 
             out T item)
         {
             return queue.TryDequeue(out item);
@@ -129,10 +124,9 @@ namespace JustCopy
         /// 큐가 비어 있으면 지정된 타임아웃 시간 동안 항목을 가져오기 위해 블로킹합니다.
         /// </summary>
         public bool TryTake(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
-#endif
-            out T item, int millisecondsTimeout)
+            [MaybeNullWhen(false)]
+            out T item,
+            int millisecondsTimeout)
         {
             if (TryTake(out item))
             {
