@@ -9,13 +9,11 @@
 #pragma warning disable IDE0161
 #pragma warning disable IDE0090
 #pragma warning disable IDE0083
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-#nullable disable
-#endif
 
 namespace JustCopy
 {
     using System;
+    using System.Diagnostics.CodeAnalysis;
     using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Threading;
@@ -78,7 +76,7 @@ namespace JustCopy
         private sealed class Segment
         {
             public readonly Slot[] Slots;
-            public Segment NextVolatile;
+            public Segment? NextVolatile;
             public int EnqueueIndex;
 
             public Segment(Slot[] slots)
@@ -92,8 +90,8 @@ namespace JustCopy
             }
         }
 
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        private static readonly bool IsReferenceOrContainsReferences = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
+#if NET6_0_OR_GREATER
+        private static readonly bool IsReferenceOrContainsReferences = System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
@@ -130,7 +128,7 @@ namespace JustCopy
         /// <summary>
         /// 재활용을 위한 세그먼트 풀 (Stack 구조)
         /// </summary>
-        private Segment recycleSegmentPool;
+        private Segment? recycleSegmentPool;
 
 #pragma warning restore CS0169
 #pragma warning restore IDE0051
@@ -232,19 +230,17 @@ namespace JustCopy
 
         private Segment PopOrNewSegmentPool(int nextSegmentSize)
         {
-            var createSegment = true;
-            Segment headSegment;
+            Segment? headSegment;
             lock (poolLock)
             {
                 headSegment = recycleSegmentPool;
                 if (!(headSegment is null))
                 {
                     recycleSegmentPool = headSegment.NextVolatile;
-                    createSegment = false;
                 }
             }
 
-            if (createSegment)
+            if (headSegment is null)
             {
                 return new Segment(nextSegmentSize);
             }
@@ -266,9 +262,7 @@ namespace JustCopy
         }
 
         public bool TryRead(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
-#endif
+        [MaybeNullWhen(false)]
             out T outItem)
         {
             var segment = tail;
@@ -312,7 +306,7 @@ namespace JustCopy
 
             if (IsReferenceOrContainsReferences)
             {
-                segmentSlot.Item = default;
+                segmentSlot.Item = default!;
             }
 
             // 읽은 슬롯은 다시 0으로 초기화하여 생산자가 재사용할 수 있도록 함
@@ -392,16 +386,19 @@ namespace JustCopy
             return new ValueTask<bool>(this, mrvtsc.Version);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         bool IValueTaskSource<bool>.GetResult(short token)
         {
             return mrvtsc.GetResult(token);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token)
         {
             return mrvtsc.GetStatus(token);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         void IValueTaskSource<bool>.OnCompleted(Action<object> continuation, object state, short token, ValueTaskSourceOnCompletedFlags flags)
         {
             mrvtsc.OnCompleted(continuation, state, token, flags);
