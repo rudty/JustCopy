@@ -3,13 +3,11 @@
 #pragma warning disable IDE0161
 #pragma warning disable IDE0090
 #pragma warning disable IDE0083
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-#nullable disable
-#endif
 
 namespace JustCopy
 {
     using System;
+    using System.Diagnostics.CodeAnalysis;
     using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Threading;
@@ -32,8 +30,8 @@ namespace JustCopy
             public int SequenceNumberVolatile;
         }
 
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        private static readonly bool IsReferenceOrContainsReferences = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
+#if NET6_0_OR_GREATER
+        private static readonly bool IsReferenceOrContainsReferences = System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
@@ -198,9 +196,7 @@ namespace JustCopy
         }
 
         public bool TryRead(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
-#endif
+            [MaybeNullWhen(false)]
             out T item)
         {
             var currentHead = Volatile.Read(ref headVolatile);
@@ -214,7 +210,7 @@ namespace JustCopy
                 item = currentSlot.Item;
                 if (IsReferenceOrContainsReferences)
                 {
-                    currentSlot.Item = default;
+                    currentSlot.Item = default!;
                 }
 
                 // 머리 위치 이동 (단일 소비자이므로 Interlocked 불필요)
@@ -258,16 +254,19 @@ namespace JustCopy
         }
 
         // IValueTaskSource<bool> 인터페이스 맵핑
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         bool IValueTaskSource<bool>.GetResult(short token)
         {
             return mrvtsc.GetResult(token);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token)
         {
             return mrvtsc.GetStatus(token);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         void IValueTaskSource<bool>.OnCompleted(Action<object> continuation, object state, short token, ValueTaskSourceOnCompletedFlags flags)
         {
             mrvtsc.OnCompleted(continuation, state, token, flags);
