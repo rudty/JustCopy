@@ -28,7 +28,7 @@ namespace JustCopy
     public sealed class MpmcLockBlockingQueue<T>
     {
 #if NET6_0_OR_GREATER
-        private static readonly bool IsReferenceOrContainsReferences = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
+        private static readonly bool IsReferenceOrContainsReferences = System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
@@ -343,7 +343,6 @@ namespace JustCopy
             /// <summary>Attempts to dequeue an item from the queue.</summary>
             /// <param name="segment">The segment from which the item was dequeued.</param>
             /// <param name="array">The array from <paramref name="segment"/>.</param>
-            /// <param name="peek">true if this is only a peek operation; false if the item should be dequeued.</param>
             /// <param name="result">The dequeued item.</param>
             /// <returns>true if an item could be dequeued; otherwise, false.</returns>
             private bool TryDequeueSlow(
@@ -416,33 +415,6 @@ namespace JustCopy
 
     static class MpmcLockBlockingQueue_Companion
     {
-
-        [StructLayout(LayoutKind.Sequential)]
-        internal struct SegmentState
-        {
-            /// <summary>Padding to reduce false sharing between the segment's array and _first.</summary>
-            private readonly PaddingFor32 _pad0;
-
-            /// <summary>The index of the current head in the segment.</summary>
-            internal volatile int _first;
-            /// <summary>A copy of the current tail index.</summary>
-            internal int _lastCopy; // not volatile as read and written by the producer, except for IsEmpty, and there _lastCopy is only read after reading the volatile _first
-
-            /// <summary>Padding to reduce false sharing between the first and last.</summary>
-            private readonly PaddingFor32 _pad1;
-
-            /// <summary>A copy of the current head index.</summary>
-            internal int _firstCopy; // not volatile as only read and written by the consumer thread
-            /// <summary>The index of the current tail in the segment.</summary>
-            internal volatile int _last;
-
-            /// <summary>Padding to reduce false sharing with the last and what's after the segment.</summary>
-            private readonly PaddingFor32 _pad2;
-        }
-
-        [StructLayout(LayoutKind.Explicit, Size = 124)]
-        internal struct PaddingFor32 { }
-
         private static readonly double tickFrequency = (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -473,5 +445,31 @@ namespace JustCopy
             var elapsedTimeStamp = currentTimeStamp - startTimeStamp;
             return unchecked((long)(elapsedTimeStamp * tickFrequency)) / TimeSpan.TicksPerMillisecond;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SegmentState
+        {
+            /// <summary>Padding to reduce false sharing between the segment's array and _first.</summary>
+            private readonly PaddingFor32 _pad0;
+
+            /// <summary>The index of the current head in the segment.</summary>
+            internal volatile int _first;
+            /// <summary>A copy of the current tail index.</summary>
+            internal int _lastCopy; // not volatile as read and written by the producer, except for IsEmpty, and there _lastCopy is only read after reading the volatile _first
+
+            /// <summary>Padding to reduce false sharing between the first and last.</summary>
+            private readonly PaddingFor32 _pad1;
+
+            /// <summary>A copy of the current head index.</summary>
+            internal int _firstCopy; // not volatile as only read and written by the consumer thread
+            /// <summary>The index of the current tail in the segment.</summary>
+            internal volatile int _last;
+
+            /// <summary>Padding to reduce false sharing with the last and what's after the segment.</summary>
+            private readonly PaddingFor32 _pad2;
+        }
+
+        [StructLayout(LayoutKind.Explicit, Size = 124)]
+        internal struct PaddingFor32 { }
     }
 }

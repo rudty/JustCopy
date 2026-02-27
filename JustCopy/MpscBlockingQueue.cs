@@ -3,14 +3,12 @@
 #pragma warning disable IDE0090
 #pragma warning disable IDE0161
 #pragma warning disable IDE0130
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-#nullable disable
-#endif
 
 namespace JustCopy
 {
     using System;
     using System.Diagnostics;
+    using System.Diagnostics.CodeAnalysis;
     using System.Threading;
     using System.Runtime.InteropServices;
     using System.Runtime.CompilerServices;
@@ -25,8 +23,8 @@ namespace JustCopy
     /// </summary>
     public sealed class MpscBlockingQueue<T>
     {
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-        private static readonly bool IsReferenceOrContainsReferences = RuntimeHelpers.IsReferenceOrContainsReferences<T>();
+#if NET6_0_OR_GREATER
+        private static readonly bool IsReferenceOrContainsReferences = System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>();
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
@@ -35,7 +33,7 @@ namespace JustCopy
         private readonly SingleProducerSingleConsumerQueue queue;
 
         private bool isWaiting;
-        private T fastItem;
+        private T fastItem = default!;
 
         public MpscBlockingQueue(int initializeSegmentSize = 4096)
         {
@@ -59,20 +57,18 @@ namespace JustCopy
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryTake(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
-#endif
+            [MaybeNullWhen(false)] 
             out T outItem)
         {
             return queue.TryDequeue(out outItem);
         }
 
         public bool TryTake(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)]
-#endif
-            out T item, int millisecondsTimeout)
+            [MaybeNullWhen(false)]
+            out T item, 
+            int millisecondsTimeout)
         {
             // 1. Fast Path
             if (TryTake(out item))
@@ -109,37 +105,40 @@ namespace JustCopy
                     return true; // 락 잡는 찰나에 들어왔는지 재확인
                 }
 
-                while (true)
+                isWaiting = true;
+
+                while (isWaiting) // 생산자가 fastItem을 주고 isWaiting을 false로 바꿀 때까지 대기
                 {
-                    // 3-2. 타임아웃 시간 갱신
                     if (useTimeout)
                     {
                         remainTimeout = MpscBlockingQueue_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
                         if (remainTimeout <= 0)
                         {
-                            return false; // 타임아웃 만료
+                            isWaiting = false; 
+                            return false;
                         }
                     }
 
-                    isWaiting = true;
                     if (!Monitor.Wait(syncRoot, remainTimeout))
                     {
-                        isWaiting = false;
-                        return false; // 타임아웃 발생 (Monitor.Wait이 false 반환)
-                    }
-
-                    // 신호 받고 깨어남 (Add에서 isWaiting을 false로 설정했음)
-                    if (!isWaiting)
-                    {
-                        item = fastItem;
-                        if (IsReferenceOrContainsReferences)
+                        if (!isWaiting)
                         {
-                            fastItem = default;
+                            break; // 기적의 배달 성공! 루프 탈출해서 아이템 수령
                         }
 
-                        return true;
+                        isWaiting = false; // 진짜 타임아웃
+                        return false;
                     }
                 }
+
+                // 💡 안전하게 fastItem 수령
+                item = fastItem;
+                if (IsReferenceOrContainsReferences)
+                {
+                    fastItem = default!;
+                }
+
+                return true;
             }
         }
 
@@ -169,7 +168,7 @@ namespace JustCopy
                 item = fastItem;
                 if (IsReferenceOrContainsReferences)
                 {
-                    fastItem = default;
+                    fastItem = default!;
                 }
 
                 return item;
@@ -220,6 +219,7 @@ namespace JustCopy
 
             /// <summary>The head of the linked list of segments.</summary>
             private volatile Segment _head;
+
             /// <summary>The tail of the linked list of segments.</summary>
             private volatile Segment _tail;
 
@@ -228,9 +228,11 @@ namespace JustCopy
             {
                 // Validate constants in ctor rather than in an explicit cctor that would cause perf degradation
                 Debug.Assert(initializeSegmentSize > 0, "Initial segment size must be > 0.");
-                Debug.Assert((initializeSegmentSize & (initializeSegmentSize - 1)) == 0, "Initial segment size must be a power of 2");
+                Debug.Assert((initializeSegmentSize & (initializeSegmentSize - 1)) == 0,
+                    "Initial segment size must be a power of 2");
                 Debug.Assert(initializeSegmentSize <= MaxSegmentSize, "Initial segment size should be <= maximum.");
-                Debug.Assert(MaxSegmentSize < int.MaxValue / 2, "Max segment size * 2 must be < int.MaxValue, or else overflow could occur.");
+                Debug.Assert(MaxSegmentSize < int.MaxValue / 2,
+                    "Max segment size * 2 must be < int.MaxValue, or else overflow could occur.");
 
                 // Initialize the queue
                 _head = _tail = new Segment(initializeSegmentSize);
@@ -280,12 +282,14 @@ namespace JustCopy
                 newSegment._state._lastCopy = 1;
 
                 try
-                { }
+                {
+                }
                 finally
                 {
                     // Finally block to protect against corruption due to a thread abort between
                     // setting _next and setting _tail (this is only relevant on .NET Framework).
-                    Volatile.Write(ref _tail._next, newSegment); // ensure segment not published until item is fully stored
+                    Volatile.Write(ref _tail._next,
+                        newSegment); // ensure segment not published until item is fully stored
                     _tail = newSegment;
                 }
             }
@@ -294,9 +298,7 @@ namespace JustCopy
             /// <param name="result">The dequeued item.</param>
             /// <returns>true if an item could be dequeued; otherwise, false.</returns>
             public bool TryDequeue(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
-#endif
+                [MaybeNullWhen(false)]
                 out T result)
 
             {
@@ -310,7 +312,7 @@ namespace JustCopy
                     result = array[first];
                     if (IsReferenceOrContainsReferences)
                     {
-                        array[first] = default; // Clear the slot to release the element
+                        array[first] = default!; // Clear the slot to release the element
                     }
 
                     segment._state._first = (first + 1) & (array.Length - 1);
@@ -318,43 +320,18 @@ namespace JustCopy
                 }
 
                 // Slow path: there may not be data available in the current segment
-                return TryDequeueSlow(segment, array, peek: false, out result);
-            }
-
-            /// <summary>Attempts to peek at an item in the queue.</summary>
-            /// <param name="result">The peeked item.</param>
-            /// <returns>true if an item could be peeked; otherwise, false.</returns>
-            public bool TryPeek(
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
-#endif
-                out T result)
-            {
-                var segment = _head;
-                var array = segment._array;
-                var first = segment._state._first; // local copy to avoid multiple volatile reads
-
-                // Fast path: there's obviously data available in the current segment
-                if (first != segment._state._lastCopy)
-                {
-                    result = array[first];
-                    return true;
-                }
-
-                // Slow path: there may not be data available in the current segment
-                return TryDequeueSlow(segment, array, peek: true, out result);
+                return TryDequeueSlow(segment, array, out result);
             }
 
             /// <summary>Attempts to dequeue an item from the queue.</summary>
             /// <param name="segment">The segment from which the item was dequeued.</param>
             /// <param name="array">The array from <paramref name="segment"/>.</param>
-            /// <param name="peek">true if this is only a peek operation; false if the item should be dequeued.</param>
             /// <param name="result">The dequeued item.</param>
             /// <returns>true if an item could be dequeued; otherwise, false.</returns>
-            private bool TryDequeueSlow(Segment segment, T[] array, bool peek,
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1
-            [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] 
-#endif
+            private bool TryDequeueSlow(
+                Segment segment,
+                T[] array,
+                [MaybeNullWhen(false)]
                 out T result)
             {
                 Debug.Assert(segment != null, "Expected a non-null segment.");
@@ -363,9 +340,7 @@ namespace JustCopy
                 if (segment._state._last != segment._state._lastCopy)
                 {
                     segment._state._lastCopy = segment._state._last;
-                    return peek ?
-                        TryPeek(out result) :
-                        TryDequeue(out result); // will only recur once for this operation
+                    return TryDequeue(out result); // will only recur once for this operation
                 }
 
                 if (segment._next != null && segment._state._first == segment._state._last)
@@ -375,7 +350,7 @@ namespace JustCopy
                     _head = segment;
                 }
 
-                int first = segment._state._first; // local copy to avoid extraneous volatile reads
+                var first = segment._state._first; // local copy to avoid extraneous volatile reads
 
                 if (first == segment._state._last)
                 {
@@ -384,12 +359,14 @@ namespace JustCopy
                 }
 
                 result = array[first];
-                if (!peek)
+                if (IsReferenceOrContainsReferences)
                 {
-                    array[first] = default; // Clear the slot to release the element
-                    segment._state._first = (first + 1) & (segment._array.Length - 1);
-                    segment._state._lastCopy = segment._state._last; // Refresh _lastCopy to ensure that _first has not passed _lastCopy
+                    array[first] = default!; // Clear the slot to release the element
                 }
+
+                segment._state._first = (first + 1) & (segment._array.Length - 1);
+                segment._state._lastCopy =
+                    segment._state._last; // Refresh _lastCopy to ensure that _first has not passed _lastCopy
 
                 return true;
             }
@@ -399,11 +376,14 @@ namespace JustCopy
             private sealed class Segment
             {
                 /// <summary>The next segment in the linked list of segments.</summary>
-                internal Segment _next;
+                internal Segment? _next;
+
                 /// <summary>The data stored in this segment.</summary>
                 internal readonly T[] _array;
+
                 /// <summary>Details about the segment.</summary>
-                internal MpscBlockingQueue_SegmentState _state; // separated out to enable StructLayout attribute to take effect
+                internal MpscBlockingQueue_Companion.SegmentState
+                    _state; // separated out to enable StructLayout attribute to take effect
 
                 /// <summary>Initializes the segment.</summary>
                 /// <param name="size">The size to use for this segment.</param>
@@ -448,34 +428,31 @@ namespace JustCopy
             var elapsedTimeStamp = currentTimeStamp - startTimeStamp;
             return unchecked((long)(elapsedTimeStamp * tickFrequency)) / TimeSpan.TicksPerMillisecond;
         }
-    }
 
-    [StructLayout(LayoutKind.Explicit, Size = 124)]
-    internal struct MpscBlockingQueue_PaddingFor32
-    {
-    }
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SegmentState
+        {
+            /// <summary>Padding to reduce false sharing between the segment's array and _first.</summary>
+            private readonly PaddingFor32 _pad0;
 
-    /// <summary>Stores information about a segment.</summary>
-    [StructLayout(LayoutKind.Sequential)] // enforce layout so that padding reduces false sharing
-    public struct MpscBlockingQueue_SegmentState
-    {
-        /// <summary>Padding to reduce false sharing between the segment's array and _first.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad0;
+            /// <summary>The index of the current head in the segment.</summary>
+            internal volatile int _first;
+            /// <summary>A copy of the current tail index.</summary>
+            internal int _lastCopy; // not volatile as read and written by the producer, except for IsEmpty, and there _lastCopy is only read after reading the volatile _first
 
-        /// <summary>The index of the current head in the segment.</summary>
-        internal volatile int _first;
-        /// <summary>A copy of the current tail index.</summary>
-        internal int _lastCopy; // not volatile as read and written by the producer, except for IsEmpty, and there _lastCopy is only read after reading the volatile _first
+            /// <summary>Padding to reduce false sharing between the first and last.</summary>
+            private readonly PaddingFor32 _pad1;
 
-        /// <summary>Padding to reduce false sharing between the first and last.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad1;
+            /// <summary>A copy of the current head index.</summary>
+            internal int _firstCopy; // not volatile as only read and written by the consumer thread
+            /// <summary>The index of the current tail in the segment.</summary>
+            internal volatile int _last;
 
-        /// <summary>A copy of the current head index.</summary>
-        internal int _firstCopy; // not volatile as only read and written by the consumer thread
-        /// <summary>The index of the current tail in the segment.</summary>
-        internal volatile int _last;
+            /// <summary>Padding to reduce false sharing with the last and what's after the segment.</summary>
+            private readonly PaddingFor32 _pad2;
+        }
 
-        /// <summary>Padding to reduce false sharing with the last and what's after the segment.</summary>
-        internal MpscBlockingQueue_PaddingFor32 _pad2;
+        [StructLayout(LayoutKind.Explicit, Size = 124)]
+        internal struct PaddingFor32 { }
     }
 }
