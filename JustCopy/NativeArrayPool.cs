@@ -3,10 +3,6 @@
 #pragma warning disable IDE0161
 #pragma warning disable IDE0074
 
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
-#nullable enable
-#endif
-
 namespace JustCopy
 {
     using System;
@@ -36,21 +32,13 @@ namespace JustCopy
         private const int NumBuckets = 27; // Utilities.SelectBucketIndex(1024 * 1024 * 1024 + 1)
 
         /// <summary>A per-thread array of arrays, to cache one array per array size per thread.</summary>
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
         [ThreadStatic] private static ThreadLocalNativeArrayBuckets? t_tlsBuckets;
-#else
-        [ThreadStatic] private static ThreadLocalNativeArrayBuckets t_tlsBuckets;
-#endif
 
         /// <summary>
         /// An array of per-core partitions. The slots are lazily initialized to avoid creating
         /// lots of overhead for unused array sizes.
         /// </summary>
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
         private static readonly NativeArrayPoolPartitions?[] _buckets = new NativeArrayPoolPartitions[NumBuckets];
-#else
-        private static readonly NativeArrayPoolPartitions[] _buckets = new NativeArrayPoolPartitions[NumBuckets];
-#endif
 
         /// <summary>Allocate a new <see cref="NativeArrayPoolPartitions"/> and try to store it into the <see cref="_buckets"/> array.</summary>
         private static NativeArrayPoolPartitions CreatePerCorePartitions(int bucketIndex)
@@ -327,7 +315,7 @@ namespace JustCopy
             // Try to push on to the associated partition first.  If that fails,
             // round-robin through the other partitions.
             var partitions = _partitions;
-            var index = (int)((uint)GetCurrentPartitionIndex() %
+            var index = (int)((uint)Thread.GetCurrentProcessorId() %
                               (uint)NativeArrayPoolStatics.s_partitionCount); // mod by constant in tier 1
             for (var i = 0; i < partitions.Length; i++)
             {
@@ -345,16 +333,6 @@ namespace JustCopy
             return false;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int GetCurrentPartitionIndex()
-        {
-#if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
-            return Thread.GetCurrentProcessorId();
-#else
-            return Thread.CurrentThread.ManagedThreadId;
-#endif
-        }
-
         /// <summary>
         /// Try to pop an array from any partition with available arrays, starting with partition associated with the current core.
         /// If all partitions are empty, null is returned.
@@ -365,7 +343,7 @@ namespace JustCopy
             // Try to pop from the associated partition first.  If that fails, round-robin through the other partitions.
             IntPtr arr;
             var partitions = _partitions;
-            var index = (int)((uint)GetCurrentPartitionIndex() %
+            var index = (int)((uint)Thread.GetCurrentProcessorId() %
                               (uint)NativeArrayPoolStatics.s_partitionCount); // mod by constant in tier 1
             for (var i = 0; i < partitions.Length; i++)
             {
