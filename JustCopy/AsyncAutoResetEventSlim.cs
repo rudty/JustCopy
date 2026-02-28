@@ -123,14 +123,14 @@
                 if (tail is null)
                 {
                     headNode = node;
-                    tailNode = node;
                 }
                 else
                 {
                     tail.Next = node;
                     node.Prev = tail;
-                    tailNode = node;
                 }
+                 
+                tailNode = node;
 
                 if (millisecondsTimeout == -1)
                 {
@@ -179,7 +179,7 @@
                 if (timeoutWaitNodeVersion == waitNodeVersion &&
                     !node.IsCompleted)
                 {
-                    if (!(node.Next is null))
+                    if (!(node.Next is null)) // is not null
                     {
                         node.Next.Prev = node.Prev;
                     }
@@ -188,7 +188,7 @@
                         tailNode = node.Prev;
                     }
 
-                    if (!(node.Prev is null))
+                    if (!(node.Prev is null)) // is not null
                     {
                         node.Prev.Next = node.Next;
                     }
