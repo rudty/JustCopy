@@ -32,8 +32,11 @@ namespace JustCopy
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
-
+#if NET10_0_OR_GREATER
+        private readonly Lock readLock = new();
+#else
         private readonly object readLock = new object();
+#endif
         private readonly object writeLock = new object();
         private readonly SingleProducerSingleConsumerQueue queue;
         private int waitingReaders;
