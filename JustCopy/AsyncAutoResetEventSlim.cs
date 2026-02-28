@@ -202,7 +202,14 @@
                     node.Prev = null;
 
                     // 위에서 Task 로 변경했으므로 따로 처리하지 않아도됨
-                    node.SetResult(false);
+                    try
+                    {
+                        node.SetResult(false);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
                 }
             }
         }
