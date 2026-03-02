@@ -20,8 +20,6 @@ namespace JustCopy
     /// <list type="bullet">
     /// <item><description><see cref="System.Collections.Concurrent.BlockingCollection{T}"/>의 글로벌 잠금(Lock) 병목으로 인해 성능 저하가 발생할 때 대체하여 사용합니다.</description></item>
     /// <item><description>모든 상황에서 BlockingCollectionSlim, MpmcLockBlockingQueue, System.Threading.Channels.Channel 은 <see cref="System.Collections.Concurrent.BlockingCollection{T}"/> 보다 좋은 성능을 냅니다</description></item>
-    /// <item><description><b>작업 스레드가 1 ~ 2개 (저경합):</b> BlockingCollectionSlim 이 컨텍스트 스위칭 오버헤드가 적어 가장 높은 효율을 보여줍니다.</description></item>
-    /// <item><description><b>작업 스레드가 3개 이상 (고경합):</b> MpmcLockBlockingQueue 가 최고의 처리량을 제공합니다.</description></item>
     /// <item><description>적용 후 실제 비즈니스 로직과 트래픽 환경에서 더 나은 성능으로 작동하는지 벤치마크 테스트를 수행하는 것을 권장합니다.</description></item>
     /// </list>
     /// </remarks>
