@@ -15,8 +15,8 @@ namespace JustCopy
 
     /// <summary>
     /// Multiple-producer single-consumer (MPSC) blocking queue.
-    /// Note: T must be non-null reference when T is reference type — Add(null) throws.
-    /// Only a single consumer may call Take/TryTake concurrently.
+    /// Note: T must be non-null reference when T is reference type — Write(null) throws.
+    /// Only a single consumer may call Take/TryRead concurrently.
     /// -
     /// BlockingCollection 의 잠금으로 성능 문제가 있을때 대신해서 사용합니다
     /// 적용 후 자신의 환경에서 더 나은 성능으로 작동하는지 테스트가 필요합니다
@@ -53,6 +53,11 @@ namespace JustCopy
             if (millisecondsTimeout == 0)
             {
                 return !queue.IsEmpty;
+            }
+
+            if (!queue.IsEmpty)
+            {
+                return true;
             }
 
             var startTimeStamp = Stopwatch.GetTimestamp();
@@ -93,6 +98,11 @@ namespace JustCopy
 
         public bool WaitToRead()
         {
+            if (!queue.IsEmpty)
+            {
+                return true;
+            }
+
             lock (waitLock)
             {
                 if (!queue.IsEmpty)
@@ -108,9 +118,9 @@ namespace JustCopy
             }
 
             return true;
-        }
+        }   
 
-        public void Add(T item)
+        public void Write(T item)
         {
             lock (waitLock)
             {
@@ -124,7 +134,7 @@ namespace JustCopy
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool TryTake(
+        public bool TryRead(
             [MaybeNullWhen(false)]
             out T outItem)
         {

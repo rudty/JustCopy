@@ -10,25 +10,25 @@ using JustCopy;
 [Collection("ALL")]
 public class MpscBlockingQueueTest
 {
-    [Fact(DisplayName = "1. 싱글 스레드 기본 Add/TryTake 테스트")]
+    [Fact(DisplayName = "1. 싱글 스레드 기본 Write/TryRead 테스트")]
     public void SingleThread_AddAndTryTake_WorksCorrectly()
     {
         // Arrange
         var queue = new MpscBlockingQueue<int>();
 
         // Act
-        queue.Add(10);
-        queue.Add(20);
+        queue.Write(10);
+        queue.Write(20);
 
         // Assert
-        Assert.True(queue.TryTake(out var item1));
+        Assert.True(queue.TryRead(out var item1));
         Assert.Equal(10, item1);
 
-        Assert.True(queue.TryTake(out var item2));
+        Assert.True(queue.TryRead(out var item2));
         Assert.Equal(20, item2);
 
         // 큐가 비었을 때 TryTake는 즉시 false를 반환해야 함 (블로킹 없음)
-        Assert.False(queue.TryTake(out var item3));
+        Assert.False(queue.TryRead(out var item3));
         Assert.Equal(0, item3);
     }
 
@@ -51,7 +51,7 @@ public class MpscBlockingQueueTest
             {
                 for (var j = 0; j < itemsPerProducer; j++)
                 {
-                    queue.Add(1);
+                    queue.Write(1);
                 }
             });
         }
@@ -66,7 +66,7 @@ public class MpscBlockingQueueTest
             while (queue.WaitToRead())
             {
                 // 💡 데이터가 있으면 락 프리(Lock-Free)로 최대한 뽑아냄
-                while (queue.TryTake(out _))
+                while (queue.TryRead(out _))
                 {
                     consumedCount++;
 
@@ -110,7 +110,7 @@ public class MpscBlockingQueueTest
             queue.WaitToRead();
 
             // 2. 깨어난 후 데이터를 빼냄
-            queue.TryTake(out var item);
+            queue.TryRead(out var item);
             return item;
         });
 
@@ -118,7 +118,7 @@ public class MpscBlockingQueueTest
         await Task.Delay(500);
 
         // 생산자가 데이터를 넣음 (이때 소비자를 깨워야 함)
-        queue.Add(expectedItem);
+        queue.Write(expectedItem);
 
         // Assert
         try
@@ -150,7 +150,7 @@ public class MpscBlockingQueueTest
         Assert.False(result);
 
         // 큐는 여전히 비어있어야 함
-        Assert.False(queue.TryTake(out var item));
+        Assert.False(queue.TryRead(out var item));
         Assert.Equal(default, item);
 
         // 타임아웃 시간이 대략적으로 지켜졌는지 확인 (여유폭 50ms)
@@ -169,7 +169,7 @@ public class MpscBlockingQueueTest
         {
             // 5초 동안 대기하지만, 중간에 데이터가 들어오면 즉시 true 반환 후 탈출해야 함
             var success = queue.WaitToRead(5000);
-            queue.TryTake(out var item);
+            queue.TryRead(out var item);
             return (success, item);
         });
 
@@ -177,7 +177,7 @@ public class MpscBlockingQueueTest
         await Task.Delay(200);
 
         // 데이터 삽입
-        queue.Add(expectedItem);
+        queue.Write(expectedItem);
 
         // Assert
         try
