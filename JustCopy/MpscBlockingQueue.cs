@@ -28,151 +28,107 @@ namespace JustCopy
 #else
         private const bool IsReferenceOrContainsReferences = true;
 #endif
-
-        private readonly object syncRoot = new object();
+        private readonly object waitLock = new object(); 
         private readonly SingleProducerSingleConsumerQueue queue;
 
-        private bool isWaiting;
-        private T fastItem = default!;
+        private volatile bool isWaiting;
 
         public MpscBlockingQueue(int initializeSegmentSize = 4096)
         {
             queue = new SingleProducerSingleConsumerQueue(initializeSegmentSize);
         }
 
+        public bool WaitToRead(int millisecondsTimeout)
+        {
+            if (millisecondsTimeout <= -1)
+            {
+                if (millisecondsTimeout == Timeout.Infinite)
+                {
+                    return WaitToRead();
+                }
+
+                throw new ArgumentOutOfRangeException(nameof(millisecondsTimeout));
+            }
+
+            if (millisecondsTimeout == 0)
+            {
+                return !queue.IsEmpty;
+            }
+
+            var startTimeStamp = Stopwatch.GetTimestamp();
+
+            lock (waitLock)
+            {
+                if (!queue.IsEmpty)
+                {
+                    return true;
+                }
+
+                isWaiting = true;
+                while (isWaiting)
+                {
+                    var remainTimeoutMilliseconds = MpscBlockingQueue_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
+                    if (remainTimeoutMilliseconds <= 0)
+                    {
+                        isWaiting = false;
+                        return false;
+                    }
+
+                    if (!Monitor.Wait(waitLock, remainTimeoutMilliseconds))
+                    {
+                        if (!isWaiting)
+                        {
+                            // 시간 만료지만 값이 들어옴
+                            break;
+                        }
+
+                        isWaiting = false; 
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        public bool WaitToRead()
+        {
+            lock (waitLock)
+            {
+                if (!queue.IsEmpty)
+                {
+                    return true;
+                }
+
+                isWaiting = true;
+                while (isWaiting)
+                {
+                    Monitor.Wait(waitLock);
+                }
+            }
+
+            return true;
+        }
+
         public void Add(T item)
         {
-            lock (syncRoot)
+            lock (waitLock)
             {
+                queue.Enqueue(item);
                 if (isWaiting)
                 {
-                    fastItem = item;
-                    isWaiting = false; // "너 이제 대기 상태 아님!" 이라고 알려줌
-                    Monitor.Pulse(syncRoot);
-                }
-                else
-                {
-                    queue.Enqueue(item);
+                    isWaiting = false;
+                    Monitor.Pulse(waitLock);
                 }
             }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryTake(
-            [MaybeNullWhen(false)] 
+            [MaybeNullWhen(false)]
             out T outItem)
         {
             return queue.TryDequeue(out outItem);
-        }
-
-        public bool TryTake(
-            [MaybeNullWhen(false)]
-            out T item, 
-            int millisecondsTimeout)
-        {
-            // 1. Fast Path
-            if (TryTake(out item))
-            {
-                return true;
-            }
-
-            if (millisecondsTimeout < -1)
-            {
-                throw new ArgumentOutOfRangeException(nameof(millisecondsTimeout));
-            }
-
-            if (millisecondsTimeout == 0)
-            {
-                return false;
-            }
-
-            var startTimeStamp = 0L;
-            var useTimeout = false;
-            var remainTimeout = millisecondsTimeout; // this will be adjusted if necessary.
-
-            if (millisecondsTimeout != Timeout.Infinite)
-            {
-                startTimeStamp = Stopwatch.GetTimestamp();
-                useTimeout = true;
-            }
-
-            // 2. Sleep 준비
-            lock (syncRoot)
-            {
-                // 3-1. Monitor.Wait 전에 항목을 다시 확인
-                if (TryTake(out item))
-                {
-                    return true; // 락 잡는 찰나에 들어왔는지 재확인
-                }
-
-                isWaiting = true;
-
-                while (isWaiting) // 생산자가 fastItem을 주고 isWaiting을 false로 바꿀 때까지 대기
-                {
-                    if (useTimeout)
-                    {
-                        remainTimeout = MpscBlockingQueue_Companion.UpdateTimeOut(startTimeStamp, millisecondsTimeout);
-                        if (remainTimeout <= 0)
-                        {
-                            isWaiting = false; 
-                            return false;
-                        }
-                    }
-
-                    if (!Monitor.Wait(syncRoot, remainTimeout))
-                    {
-                        if (!isWaiting)
-                        {
-                            break; // 기적의 배달 성공! 루프 탈출해서 아이템 수령
-                        }
-
-                        isWaiting = false; // 진짜 타임아웃
-                        return false;
-                    }
-                }
-
-                // 💡 안전하게 fastItem 수령
-                item = fastItem;
-                if (IsReferenceOrContainsReferences)
-                {
-                    fastItem = default!;
-                }
-
-                return true;
-            }
-        }
-
-        public T Take()
-        {
-            // 1. Fast Path
-            if (TryTake(out var item))
-            {
-                return item;
-            }
-
-            // 2. Sleep 준비
-            lock (syncRoot)
-            {
-                if (TryTake(out item))
-                {
-                    return item; // 락 잡는 찰나에 들어왔는지 재확인
-                }
-
-                isWaiting = true;
-
-                while (isWaiting)
-                {
-                    Monitor.Wait(syncRoot);
-                }
-
-                item = fastItem;
-                if (IsReferenceOrContainsReferences)
-                {
-                    fastItem = default!;
-                }
-
-                return item;
-            }
         }
 
         // Licensed to the .NET Foundation under one or more agreements.
@@ -236,6 +192,30 @@ namespace JustCopy
 
                 // Initialize the queue
                 _head = _tail = new Segment(initializeSegmentSize);
+            }
+
+            /// <summary>Gets whether the collection is currently empty.</summary>
+            /// <remarks>WARNING: This should not be used concurrently without further vetting.</remarks>
+            public bool IsEmpty
+            {
+                get
+                {
+                    // This implementation is optimized for calls from the consumer.
+
+                    var head = _head;
+
+                    if (head._state._first != head._state._lastCopy)
+                    {
+                        return false; // _first is volatile, so the read of _lastCopy cannot get reordered
+                    }
+
+                    if (head._state._first != head._state._last)
+                    {
+                        return false;
+                    }
+
+                    return head._next == null;
+                }
             }
 
             /// <summary>Enqueues an item into the queue.</summary>
