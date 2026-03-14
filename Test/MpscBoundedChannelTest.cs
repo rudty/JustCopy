@@ -108,13 +108,13 @@ public class MpscBoundedChannelTests
         var expectedTotalMessages = producerCount * messagesPerProducer;
 
         // 🚀 수정됨: 생산자 Tasks를 먼저 스레드 풀에 띄움 (소비자 기아 상태 방지)
-        var producerTasks = Enumerable.Range(0, producerCount).Select(_ => Task.Run(() =>
+        var producerTasks = Enumerable.Range(0, producerCount).Select(_ => Task.Factory.StartNew(() =>
         {
             for (long i = 1; i <= messagesPerProducer; i++)
             {
                 channel.Write(i);
             }
-        })).ToArray();
+        }, TaskCreationOptions.LongRunning)).ToArray();
 
         // 🚀 수정됨: 생산자들이 스레드 풀에 안착할 시간을 살짝 줌
         await Task.Delay(100);
@@ -138,7 +138,6 @@ public class MpscBoundedChannelTests
         // Assert: 모든 생산자와 소비자가 무사히 끝날 때까지 대기
         try
         {
-            // 🚀 수정됨: 생산자와 소비자를 Task.WhenAll로 묶어서 동시에 비동기 대기!
             var allTasks = producerTasks.Append(consumerTask);
             await Task.WhenAll(allTasks).WaitAsync(TimeSpan.FromSeconds(60));
         }
