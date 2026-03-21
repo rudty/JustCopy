@@ -399,7 +399,7 @@ namespace JustCopy
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void IValueTaskSource<bool>.OnCompleted(Action<object> continuation, object state, short token, ValueTaskSourceOnCompletedFlags flags)
+        void IValueTaskSource<bool>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
         {
             mrvtsc.OnCompleted(continuation, state, token, flags);
         }
